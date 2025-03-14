@@ -443,3 +443,15 @@ oauth-openshift-664fbb9d49-r5bzk   1/1     Running             0          28s
 ```
 
 ![provider-image](assets/provider-image.png)
+
+## Registry Authentication
+
+```code
+oc create secret docker-registry docker-hub \
+    --docker-server=docker.io \
+    --docker-username= \
+    --docker-password='' \
+    --docker-email=''
+```
+
+oc secrets link default docker-hub --for=pull
