@@ -2,7 +2,30 @@
 
 ⚠️ WIP
 
-## Identity Provider `htpasswd`
+- [Red Hat OpenShift Day-2 Operations](#red-hat-openshift-day-2-operations)
+  - [OpenShift Identity Providers](#openshift-identity-providers)
+    - [Configure `htpasswd`](#configure-htpasswd)
+    - [Updating User](#updating-user)
+    - [Configure RBAC Permissions](#configure-rbac-permissions)
+  - [Node Configurations](#node-configurations)
+    - [Make a Control-Plane Node `scheduable`](#make-a-control-plane-node-scheduable)
+  - [Troubleshooting](#troubleshooting)
+    - [Gathering Logs](#gathering-logs)
+  - [Nested Virtualization](#nested-virtualization)
+  - [Replacing the default Ingress Certificate](#replacing-the-default-ingress-certificate)
+  - [OpenShift Web Console Customizations](#openshift-web-console-customizations)
+    - [Customizing the Web Console in OpenShift Container Platform](#customizing-the-web-console-in-openshift-container-platform)
+    - [Customizing the Login/Provider Page](#customizing-the-loginprovider-page)
+  - [Registry Authentication](#registry-authentication)
+  - [Quick NFS Storage](#quick-nfs-storage)
+    - [Install the NFS Server](#install-the-nfs-server)
+    - [OpenShift NFS Provisioner Template](#openshift-nfs-provisioner-template)
+    - [Deploying a Test-workload](#deploying-a-test-workload)
+
+
+## OpenShift Identity Providers
+
+### Configure `htpasswd`
 
 [Docs: Configuring an htpasswd identity provider](https://docs.redhat.com/en/documentation/openshift_container_platform/4.17/html/authentication_and_authorization/configuring-identity-providers#configuring-htpasswd-identity-provider)
 
@@ -38,7 +61,7 @@ This can also be done using the OpenShift User Interface:
 
 `oc get secret htpass-secret -ojsonpath={.data.htpasswd} -n openshift-config | base64 --decode > users.htpasswd`
 
-## Configure Permissions
+### Configure RBAC Permissions
 
 [Docs: Using RBAC to define and apply permissions](https://docs.redhat.com/en/documentation/openshift_container_platform/4.17/html/authentication_and_authorization/using-rbac#authorization-overview_using-rbac)
 
@@ -65,7 +88,9 @@ Alternatively via the WebUi:
 
 ![rolebinding](assets/rolebinding.png)
 
-## Make a Control-Plane Node `scheduable`
+## Node Configurations
+
+### Make a Control-Plane Node `scheduable`
 
 Red Hat KB6148012 - [How to schedule pod on master node where scheduling is disabled?](https://access.redhat.com/solutions/6148012)
 
@@ -270,16 +295,16 @@ Enable features on vSphere:
 
 ![nested-v](assets/nested-v-on-vsphere.png)
 
-## Replacing the default ingress certificate
+## Replacing the default Ingress Certificate
 
 Prerequisites:
 
-* You must have a wildcard certificate for the fully qualified .apps subdomain and its corresponding private key. Each should be in a separate PEM format file.
-* The private key must be unencrypted. If your key is encrypted, decrypt it before importing it into OpenShift Container Platform.
-* The certificate must include the subjectAltName extension showing *.apps.<clustername>.<domain>.
-* The certificate file can contain one or more certificates in a chain. The wildcard certificate must be the first certificate in the file. It can then be followed with any intermediate certificates, and the file should end with the root CA certificate.
-* Copy the root CA certificate into an additional PEM format file.
-* Verify that all certificates which include -----END CERTIFICATE----- also end with one carriage return after that line.
+- You must have a wildcard certificate for the fully qualified .apps subdomain and its corresponding private key. Each should be in a separate PEM format file.
+- The private key must be unencrypted. If your key is encrypted, decrypt it before importing it into OpenShift Container Platform.
+- The certificate must include the subjectAltName extension showing *.apps.<clustername>.<domain>.
+- The certificate file can contain one or more certificates in a chain. The wildcard certificate must be the first certificate in the file. It can then be followed with any intermediate certificates, and the file should end with the root CA certificate.
+- Copy the root CA certificate into an additional PEM format file.
+- Verify that all certificates which include -----END CERTIFICATE----- also end with one carriage return after that line.
 
 Create a config map that includes only the root CA certificate used to sign the wildcard certificate:
 
@@ -329,9 +354,9 @@ oc patch ingresscontroller.operator default \
 
 Watch the ClusterOperator (`co`) for the status update.
 
-## Login Customizations
+## OpenShift Web Console Customizations
 
-### Customizing the web console in OpenShift Container Platform
+### Customizing the Web Console in OpenShift Container Platform
 
 [Docs - Customizing the web console in OpenShift Container Platform](https://docs.openshift.com/container-platform/4.17/web_console/customizing-the-web-console.html)
 
@@ -362,7 +387,7 @@ Once the Operator configuration is updated, it will sync the custom logo config 
 
 Validate: `oc get clusteroperator console`
 
-### Customizing the login/provider page
+### Customizing the Login/Provider Page
 
 [Docs - Customizing the login page](https://docs.openshift.com/container-platform/4.17/web_console/customizing-the-web-console.html)
 
@@ -455,3 +480,275 @@ oc create secret docker-registry docker-hub \
 ```
 
 oc secrets link default docker-hub --for=pull
+
+## Quick NFS Storage
+
+### Install the NFS Server
+
+In can be handy to have a NFS backend storage for an OpenShift cluster available quickly. The following instructions guides you through the installation of a NFS server installed on a RHEL bastion host.
+
+Install the NFS package and activate the service:
+
+```code
+dnf install nfs-utils -y
+systemctl enable nfs-server.service
+systemctl start nfs-server.service
+systemctl status nfs-server.service
+```
+
+Create the directory in which the Persistent Volumes will be stored in:
+
+```code
+mkdir /srv/nfs-storage-pv-user-pvs
+chmod g+w /srv/nfs-storage-pv-user-pvs
+```
+
+Configure the folder as well as the network CIDR for the systems which are accessing the NFS server:
+
+```code
+vi /etc/exports
+/srv/nfs-storage-pv-user-pvs  10.198.15.0/24(rw,sync,no_root_squash)
+systemctl restart nfs-server
+exportfs -arv
+exportfs -s
+```
+
+Configure the firewall on the RHEL accordingly:
+
+```
+firewall-cmd --permanent --add-service=nfs
+firewall-cmd --permanent --add-service=rpc-bind
+firewall-cmd --permanent --add-service=mountd
+firewall-cmd --reload
+```
+
+### OpenShift NFS Provisioner Template
+
+We need a NFS provisioner in order to consume the NFS service. Create the following OpenShift template and make sure to adjust the IP address as well as the path to the NFS folder accordingly at the end of the file:
+
+Example:
+
+```yaml
+- name: NFS_SERVER
+  required: true
+  value: xxx.xxx.xxx.xxx ## IP of the host which runs the NFS server
+- name: NFS_PATH
+  required: true
+  value: /srv/nfs-storage-pv-user-pvs ## folder which was configured on the NFS server
+```
+
+Create the template:
+
+```yaml
+tee nfs-provisioner-template.yaml > /dev/null <<'EOF'
+apiVersion: template.openshift.io/v1
+kind: Template
+labels:
+  template: nfs-client-provisioner
+message: 'NFS storage class ${STORAGE_CLASS} created.'
+metadata:
+  annotations:
+    description: nfs-client-provisioner
+    openshift.io/display-name: nfs-client-provisioner
+    openshift.io/provider-display-name: Tiger Team
+    tags: infra,nfs
+    template.openshift.io/documentation-url: nfs-client-provisioner
+    template.openshift.io/long-description: nfs-client-provisioner
+    version: 0.0.1
+  name: nfs-client-provisioner
+objects:
+- kind: Namespace
+  apiVersion: v1
+  metadata:
+    name: ${TARGET_NAMESPACE}
+- kind: ServiceAccount
+  apiVersion: v1
+  metadata:
+    name: nfs-client-provisioner
+    namespace: ${TARGET_NAMESPACE}
+- kind: ClusterRole
+  apiVersion: rbac.authorization.k8s.io/v1
+  metadata:
+    name: nfs-client-provisioner-runner
+  rules:
+    - apiGroups: [""]
+      resources: ["persistentvolumes"]
+      verbs: ["get", "list", "watch", "create", "delete"]
+    - apiGroups: [""]
+      resources: ["persistentvolumeclaims"]
+      verbs: ["get", "list", "watch", "update"]
+    - apiGroups: ["storage.k8s.io"]
+      resources: ["storageclasses"]
+      verbs: ["get", "list", "watch"]
+    - apiGroups: [""]
+      resources: ["events"]
+      verbs: ["create", "update", "patch"]
+
+- kind: ClusterRoleBinding
+  apiVersion: rbac.authorization.k8s.io/v1
+  metadata:
+    name: run-nfs-client-provisioner
+  subjects:
+    - kind: ServiceAccount
+      name: nfs-client-provisioner
+      namespace: ${TARGET_NAMESPACE}
+  roleRef:
+    kind: ClusterRole
+    name: nfs-client-provisioner-runner
+    apiGroup: rbac.authorization.k8s.io
+
+- kind: Role
+  apiVersion: rbac.authorization.k8s.io/v1
+  metadata:
+    name: nfs-client-provisioner
+    namespace: ${TARGET_NAMESPACE}
+  rules:
+    - apiGroups: [""]
+      resources: ["endpoints"]
+      verbs: ["get", "list", "watch", "create", "update", "patch"]
+    - apiGroups: ["security.openshift.io"]
+      resourceNames: ["hostmount-anyuid"]
+      resources: ["securitycontextconstraints"]
+      verbs: ["use"]
+
+- kind: RoleBinding
+  apiVersion: rbac.authorization.k8s.io/v1
+  metadata:
+    name: nfs-client-provisioner
+    namespace: ${TARGET_NAMESPACE}
+  subjects:
+    - kind: ServiceAccount
+      name: nfs-client-provisioner
+  roleRef:
+    kind: Role
+    name: nfs-client-provisioner
+    apiGroup: rbac.authorization.k8s.io
+
+- kind: Deployment
+  apiVersion: apps/v1
+  metadata:
+    name: nfs-client-provisioner
+    namespace: ${TARGET_NAMESPACE}
+  spec:
+    replicas: 1
+    selector:
+      matchLabels:
+        app: nfs-client-provisioner
+    strategy:
+      type: Recreate
+    template:
+      metadata:
+        labels:
+          app: nfs-client-provisioner
+      spec:
+        serviceAccountName: nfs-client-provisioner
+        containers:
+          - name: nfs-client-provisioner
+            image: ${PROVISIONER_IMAGE}
+            volumeMounts:
+              - name: nfs-client-root
+                mountPath: /persistentvolumes
+            env:
+              - name: PROVISIONER_NAME
+                value: ${PROVISIONER_NAME}
+              - name: NFS_SERVER
+                value: ${NFS_SERVER}
+              - name: NFS_PATH
+                value: ${NFS_PATH}
+        volumes:
+          - name: nfs-client-root
+            nfs:
+              server: ${NFS_SERVER}
+              path: ${NFS_PATH}
+
+- apiVersion: storage.k8s.io/v1
+  kind: StorageClass
+  metadata:
+    name: managed-nfs-storage
+    annotations:
+      storageclass.kubernetes.io/is-default-class: "true"
+  provisioner: ${PROVISIONER_NAME}
+  parameters:
+    archiveOnDelete: "false"
+
+parameters:
+- description: Target namespace where nfs-client-provisioner will run.
+  displayName: Target namespace
+  name: TARGET_NAMESPACE
+  required: true
+  value: openshift-nfs-provisioner
+- name: NFS_SERVER
+  required: true
+  value: xxx.xxx.xxx.xxx ## IP of the host which runs the NFS server
+- name: NFS_PATH
+  required: true
+  value: /srv/nfs-storage-pv-user-pvs ## folder which was configured on the NFS server
+- name: PROVISIONER_IMAGE
+  value: registry.k8s.io/sig-storage/nfs-subdir-external-provisioner:v4.0.2
+- name: PROVISIONER_NAME
+  value: "nfs-client-provisioner"
+EOF
+```
+
+Deploy the template: `oc process -f nfs-provisioner-template.yaml | oc apply -f -`
+
+### Deploying a Test-workload
+
+```yaml
+oc -n test1 create -f - <<EOF
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: ubi9
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ubi9
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: ubi9
+    spec:
+      storageClassName: managed-nfs-storage
+      volumes:
+        - name: pvc
+          persistentVolumeClaim:
+            claimName: pvc
+      containers:
+        - name: ubi
+          image: 'registry.access.redhat.com/ubi9/ubi-micro:latest'
+          volumeMounts:
+            - name: pvc
+              mountPath: /pvc
+          command:
+            - /bin/sh
+            - '-c'
+            - |
+              sleep infinity
+EOF
+```
+
+Create the first `PersistentVolumeClaim` either via the OpenShift Webconsole or via `oc`:
+
+```yaml
+oc -n test create -f - <<EOF
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: managed-nfs-storage
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  capacity:
+    storage: 5Gi
+EOF
+```
