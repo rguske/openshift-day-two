@@ -21,6 +21,11 @@
     - [Install the NFS Server](#install-the-nfs-server)
     - [OpenShift NFS Provisioner Template](#openshift-nfs-provisioner-template)
     - [Deploying a Test-workload](#deploying-a-test-workload)
+  - [USB Client Passthrough](#usb-client-passthrough)
+    - [Adjust the VM Configuration (specs)](#adjust-the-vm-configuration-specs)
+    - [Identify USB Vendor and Product ID](#identify-usb-vendor-and-product-id)
+    - [Connect to your VM using `virtctl`](#connect-to-your-vm-using-virtctl)
+    - [Start redirecting the USB Device](#start-redirecting-the-usb-device)
 
 
 ## OpenShift Identity Providers
@@ -751,4 +756,91 @@ spec:
   capacity:
     storage: 5Gi
 EOF
+```
+
+## USB Client Passthrough
+
+Not supported in Red Hat OpenShift Virtualization!
+
+- [Kubevirt - Client Passthrough](https://kubevirt.io/user-guide/compute/client_passthrough/#client-passthrough)
+
+From the official docs:
+
+Support for redirection of client's USB device was introduced in release v0.44. This feature is not enabled by default. To enable it, add an empty clientPassthrough under devices, as such:
+
+### Adjust the VM Configuration (specs)
+
+```yaml
+spec:
+  domain:
+    devices:
+      clientPassthrough: {}
+```
+
+> There are two ways of redirecting the same USB devices: Either using its device's vendor and product information or the actual bus and device address information. In Linux, you can gather this info with lsusb, a redacted example below:
+
+### Identify USB Vendor and Product ID
+
+Connect an USB device like e.g. an external CD-Rom device. I've connected it to my MacBook, installed `lsusb` via `brew` and checked for the Vendor ID and Product ID.
+
+```shell
+lsusb
+[...]
+Bus 002 Device 001: ID 0e8d:1806 MediaTek Inc. MT1806  Serial: R8RY6GAC60008Y
+[...]
+```
+
+### Connect to your VM using `virtctl`
+
+Connect to your VM running on OpenShift Virtualization.
+
+```shell
+virtctl console rguske-rhel9
+Successfully connected to rguske-rhel9 console. The escape sequence is ^]
+
+rguske-rhel9 login:
+
+[cloud-user@rguske-rhel9 ~]$ lsusb
+Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 002 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+```
+
+### Start redirecting the USB Device
+
+On your local machine, install `virtctl` and the `usbredir`. I've installed both using `brew`.
+
+```shell
+sudo virtctl usbredir 0e8d:1806 rguske-rhel9
+
+{"component":"portforward","level":"info","msg":"port_arg: '127.0.0.1:49275'","pos":"client.go:166","timestamp":"2025-03-26T10:19:43.292294Z"}
+{"component":"portforward","level":"info","msg":"args: '[--device 0e8d:1806 --to 127.0.0.1:49275]'","pos":"client.go:167","timestamp":"2025-03-26T10:19:43.293541Z"}
+{"component":"portforward","level":"info","msg":"Executing commandline: 'usbredirect [--device 0e8d:1806 --to 127.0.0.1:49275]'","pos":"client.go:168","timestamp":"2025-03-26T10:19:43.293591Z"}
+{"component":"portforward","level":"info","msg":"Connected to usbredirect at 610.549083ms","pos":"client.go:132","timestamp":"2025-03-26T10:19:43.903058Z"}
+```
+
+The output will show the redirection to your Virtual Machine.
+
+On your target VM, you'll notice:
+
+```shell
+[151999.488527] usb 1-1: new high-speed USB device number 9 using xhci_hcd
+[152000.279607] usb 1-1: New USB device found, idVendor=0e8d, idProduct=1806, bcdDevice= 0.00
+[152000.280126] usb 1-1: New USB device strings: Mfr=1, Product=2, SerialNumber=3
+[152000.280490] usb 1-1: Product: MT1806
+[152000.280786] usb 1-1: Manufacturer: MediaTek Inc
+[152000.281075] usb 1-1: SerialNumber: R8RY6GAC60008Y
+[152000.548218] usb-storage 1-1:1.0: USB Mass Storage device detected
+[152000.551594] scsi host7: usb-storage 1-1:1.0
+[152001.907628] scsi 7:0:0:0: CD-ROM            ASUS     SDRW-08D3S-U     F201 PQ: 0 ANSI: 0
+[152002.595801] sr 7:0:0:0: [sr0] scsi3-mmc drive: 24x/24x writer dvd-ram cd/rw xa/form2 cdda tray
+[152003.026401] sr 7:0:0:0: Attached scsi generic sg0 type 5
+```
+
+Using `lsusb` will show the connected device:
+
+```shell
+[cloud-user@rguske-rhel9 ~]$ lsusb
+Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 001 Device 009: ID 0e8d:1806 MediaTek Inc. Samsung SE-208 Slim Portable DVD Writer
+Bus 002 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
 ```
