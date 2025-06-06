@@ -5,9 +5,14 @@
 - [Red Hat OpenShift Day-2 Operations](#red-hat-openshift-day-2-operations)
   - [OpenShift Identity Providers](#openshift-identity-providers)
     - [Configure `htpasswd`](#configure-htpasswd)
-    - [Updating User](#updating-user)
-    - [Configure RBAC Permissions](#configure-rbac-permissions)
+      - [Updating User](#updating-user)
+      - [Configure RBAC Permissions](#configure-rbac-permissions)
+    - [Configuring LDAP](#configuring-ldap)
+      - [Obtain the certificate from a Windows Server](#obtain-the-certificate-from-a-windows-server)
+      - [Validations](#validations)
+      - [Creating the CR](#creating-the-cr)
   - [Node Configurations](#node-configurations)
+    - [NTP using Chrony](#ntp-using-chrony)
     - [Make a Control-Plane Node `scheduable`](#make-a-control-plane-node-scheduable)
   - [Troubleshooting](#troubleshooting)
     - [Gathering Logs](#gathering-logs)
@@ -17,6 +22,10 @@
     - [Customizing the Web Console in OpenShift Container Platform](#customizing-the-web-console-in-openshift-container-platform)
     - [Customizing the Login/Provider Page](#customizing-the-loginprovider-page)
   - [Registry Authentication](#registry-authentication)
+  - [Activate Internal Registry](#activate-internal-registry)
+    - [Storage Configuration](#storage-configuration)
+    - [Activate the Registry Route](#activate-the-registry-route)
+    - [Accessing the Registry](#accessing-the-registry)
   - [Quick NFS Storage](#quick-nfs-storage)
     - [Install the NFS Server](#install-the-nfs-server)
     - [OpenShift NFS Provisioner Template](#openshift-nfs-provisioner-template)
@@ -62,11 +71,11 @@ This can also be done using the OpenShift User Interface:
 
 ![configure-oauth-passd](assets/oauth-passwd.png)
 
-### Updating User
+#### Updating User
 
 `oc get secret htpass-secret -ojsonpath={.data.htpasswd} -n openshift-config | base64 --decode > users.htpasswd`
 
-### Configure RBAC Permissions
+#### Configure RBAC Permissions
 
 [Docs: Using RBAC to define and apply permissions](https://docs.redhat.com/en/documentation/openshift_container_platform/4.17/html/authentication_and_authorization/using-rbac#authorization-overview_using-rbac)
 
@@ -93,7 +102,174 @@ Alternatively via the WebUi:
 
 ![rolebinding](assets/rolebinding.png)
 
+### Configuring LDAP
+
+[Configuring an LDAP identity provider](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/authentication_and_authorization/configuring-identity-providers#identity-provider-overview_configuring-ldap-identity-provider)
+
+To use the identity provider, you must define an OpenShift Container Platform Secret object that contains the bindPassword field.
+
+```shell
+oc create secret generic ldap-secret \
+    --from-literal='r3dh4t1!' \
+    -n openshift-config
+```
+
+Identity providers use OpenShift Container Platform ConfigMap objects in the openshift-config namespace to contain the certificate authority bundle. These are primarily used to contain certificate bundles needed by the identity provider.
+
+```shell
+oc create configmap ca-config-map \
+    --from-file=ca.crt=/path/to/ca \
+    -n openshift-config
+```
+
+There's also an option to skip the certificate verification:
+
+```yaml
+      insecure: true
+```
+
+#### Obtain the certificate from a Windows Server
+
+Via MMC (Microsoft Management Console):
+Open MMC:
+
+Press `Win + R`, type `mmc`, press Enter.
+Add the Certificates Snap-in:
+
+In MMC, go to File > Add/Remove Snap-in.
+Select Certificates, click Add.
+Choose Computer account, then Local computer, click Finish.
+Navigate to the Certificate:
+
+Expand Certificates (Local Computer).
+Look under:
+Personal > Certificates for most service-related certs.
+Web Hosting > Certificates for IIS SSL certs.
+Export the Certificate:
+
+Right-click the certificate > All Tasks > Export.
+Use the Certificate Export Wizard.
+Choose Yes, export the private key if needed (e.g., for backup or moving).
+Choose format: .PFX (with private key), or .CER (public cert only).
+
+#### Validations
+
+Validate the bind user and the appropriate configuration using `ldapsearch`:
+
+```shell
+ldapsearch -x -H ldap://w2k19-dc.rguske.coe.muc.redhat.com -D sa-ldap-bind \
+    -b "DC=rguske,DC=coe,DC=muc,DC=redhat,DC=com" \
+    -W '(sAMAccountName=rguske)'
+```
+
+#### Creating the CR
+
+Creating the LDAP CR:
+
+The following custom resource (CR) shows the parameters and acceptable values for an LDAP identity provider.
+
+```yaml
+apiVersion: config.openshift.io/v1
+kind: OAuth
+metadata:
+  name: cluster
+spec:
+  identityProviders:
+  - name: ldapidp
+    mappingMethod: claim
+    type: LDAP
+    ldap:
+      attributes:
+        id:
+        - dn
+        email:
+        - mail
+        name:
+        - cn
+        preferredUsername:
+        - uid
+      bindDN: "sa-ldap-bind"
+      bindPassword:
+        name: ldap-bind-password-qrzn9
+#      ca:
+#        name: ca-config-map
+      insecure: true
+      url: "ldap://w2k19-dc.rguske.coe.muc.redhat.com/DC=rguske,DC=coe,DC=muc,DC=redhat,DC=com?sAMAccountName"
+```
+
 ## Node Configurations
+
+### NTP using Chrony
+
+[Docs - Configuring chrony time service](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/machine_configuration/machine-configs-configure#installation-special-config-chrony_machine-configs-configure)
+
+> You can set the time server and related settings used by the chrony time service (chronyd) by modifying the contents of the `chrony.conf` file.
+
+Create a Butane config including the contents of the `chrony.conf` file. For example, to configure chrony on worker nodes, create a `99-worker-chrony.bu` file.
+
+```yaml
+tee 99-worker-chrony.bu > /dev/null <<'EOF'
+variant: openshift
+version: 4.18.0
+metadata:
+  name: 99-worker-chrony
+  labels:
+    machineconfiguration.openshift.io/role: worker
+storage:
+  files:
+  - path: /etc/chrony.conf
+    mode: 0644
+    overwrite: true
+    contents:
+      inline: |
+        server 10.10.42.20 iburst
+        driftfile /var/lib/chrony/drift
+        makestep 1.0 3
+        rtcsync
+        logdir /var/log/chrony
+EOF
+```
+
+Use Butane (`brew install butane`) to generate a MachineConfig object file, 99-worker-chrony.yaml, containing the configuration to be delivered to the nodes:
+
+`butane 99-worker-chrony.bu -o 99-worker-chrony.yaml`
+
+Apply the config: `oc apply -f 99-worker-chrony.yaml`
+
+Alternatively to `butane`:
+
+```code
+chronybase64=$(cat << EOF | base64 -w 0
+server 10.10.42.20 iburst
+driftfile /var/lib/chrony/drift
+makestep 1.0 3
+rtcsync
+logdir /var/log/chrony
+EOF
+)
+```
+
+```yaml
+oc apply -f - << EOF
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  labels:
+    machineconfiguration.openshift.io/role: worker
+  name: 50-worker-chrony
+spec:
+  config:
+    ignition:
+      version: 2.2.0
+    storage:
+      files:
+      - contents:
+          source: data:text/plain;charset=utf-8;base64,${chronybase64}
+        filesystem: root
+        mode: 0644
+        path: /etc/chrony.conf
+EOF
+```
 
 ### Make a Control-Plane Node `scheduable`
 
@@ -485,6 +661,119 @@ oc create secret docker-registry docker-hub \
 ```
 
 oc secrets link default docker-hub --for=pull
+
+## Activate Internal Registry
+
+[Docs - Changing the image registry’s management state](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/registry/setting-up-and-configuring-the-registry#registry-change-management-state_configuring-registry-storage-vsphere)
+
+You need to first activate the Internal Registry by changing its state to `managed`. To start the image registry, you must change the Image Registry Operator configuration’s managementState from `Removed` to `Managed`.
+
+```code
+oc patch configs.imageregistry.operator.openshift.io cluster --type merge --patch '{"spec":{"managementState":"Managed"}}'
+```
+
+Default:
+
+```code
+oc get configs.imageregistry.operator.openshift.io cluster
+NAME      AGE
+cluster   36d
+
+oc get configs.imageregistry.operator.openshift.io cluster -oyaml | grep managementState
+  managementState: Removed
+
+oc patch configs.imageregistry.operator.openshift.io cluster --type merge --patch '{"spec":{"managementState":"Managed"}}'
+config.imageregistry.operator.openshift.io/cluster patched
+
+oc get configs.imageregistry.operator.openshift.io cluster -oyaml | grep managementState
+  managementState: Managed
+```
+
+### Storage Configuration
+
+[Docs -  Image registry storage configuration](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/registry/setting-up-and-configuring-the-registry#installation-registry-storage-config_configuring-registry-storage-vsphere)
+
+Verify that you do not have a registry pod:
+
+```code
+oc get pod -n openshift-image-registry -l docker-registry=default
+```
+
+Edit the cluster operator:
+
+```code
+oc edit configs.imageregistry.operator.openshift.io
+```
+
+Adjust the storage section accordingly. Leave the claim field blank to allow the automatic creation of an image-registry-storage persistent volume claim (PVC).
+
+```yaml
+[...]
+storage:
+    pvc:
+      claim:
+[...]
+```
+
+### Activate the Registry Route
+
+[Docs - Enable the Image Registry default route with the Custom Resource Definition](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/registry/configuring-registry-operator#registry-operator-default-crd_configuring-registry-operator)
+
+In OpenShift Container Platform, the Registry Operator controls the OpenShift image registry feature. The Operator is defined by the `configs.imageregistry.operator.openshift.io` Custom Resource Definition (CRD).
+
+If you need to automatically enable the Image Registry default route, patch the Image Registry Operator CRD.
+
+```code
+oc patch configs.imageregistry.operator.openshift.io/cluster --type merge -p '{"spec":{"defaultRoute":true}}'
+```
+
+```code
+oc -n openshift-image-registry get route
+NAME            HOST/PORT                                                        PATH   SERVICES         PORT    TERMINATION   WILDCARD
+default-route   default-route-openshift-image-registry.apps.ocp-mk1.jarvis.lab          image-registry   <all>   reencrypt     None
+```
+
+### Accessing the Registry
+
+[Docs - Exposing a default registry manually](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/registry/securing-exposing-registry#registry-exposing-default-registry-manually_securing-exposing-registry)
+
+```code
+podman login -u rguske -p $(oc whoami -t) --tls-verify=false $HOST
+Login Succeeded!
+```
+
+With Certificate:
+
+```code
+oc extract secret/$(oc get ingresscontroller -n openshift-ingress-operator default -o json | jq '.spec.defaultCertificate.name // "router-certs-default"' -r) -n openshift-ingress --confirm
+```
+
+```code
+sudo mv tls.crt /etc/pki/ca-trust/source/anchors/
+```
+
+```code
+sudo update-ca-trust enable
+```
+
+Create a Secret using the exracted certificates:
+
+```code
+oc create secret tls public-route-tls \
+    -n openshift-image-registry \
+    --cert=/Users/rguske/Downloads/tls.crt \
+    --key=/Users/rguske/Downloads/tls.key
+```
+
+Configure the Operator using `oc edit configs.imageregistry.operator.openshift.io/cluster`
+
+```yaml
+  routes:
+    - name: public-routes
+      hostname: default-route-openshift-image-registry.apps.ocp-mk1.jarvis.lab
+      secretName: public-route-tls
+```
+
 
 ## Quick NFS Storage
 
