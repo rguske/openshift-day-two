@@ -28,6 +28,7 @@
     - [Accessing the Registry](#accessing-the-registry)
   - [Quick NFS Storage](#quick-nfs-storage)
     - [Install the NFS Server](#install-the-nfs-server)
+    - [NFS CSI Driver](#nfs-csi-driver)
     - [OpenShift NFS Provisioner Template](#openshift-nfs-provisioner-template)
     - [Deploying a Test-workload](#deploying-a-test-workload)
   - [USB Client Passthrough](#usb-client-passthrough)
@@ -815,6 +816,84 @@ firewall-cmd --permanent --add-service=rpc-bind
 firewall-cmd --permanent --add-service=mountd
 firewall-cmd --reload
 ```
+
+### NFS CSI Driver
+
+```code
+# Add Helm repo
+helm repo add csi-driver-nfs https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts
+
+# List versions
+helm search repo -l csi-driver-nfs
+```
+
+Install the NFS provisioner:
+
+```code
+helm install csi-driver-nfs csi-driver-nfs/csi-driver-nfs --version 4.11.0 \
+  --create-namespace \
+  --namespace csi-driver-nfs \
+  --set controller.runOnControlPlane=true \
+  --set controller.replicas=2 \
+  --set controller.strategyType=RollingUpdate \
+  --set externalSnapshotter.enabled=true \
+  --set externalSnapshotter.customResourceDefinitions.enabled=false
+```
+
+For a SNO setup:
+
+```code
+helm install csi-driver-nfs csi-driver-nfs/csi-driver-nfs --version 4.11.0 \
+  --create-namespace \
+  --namespace csi-driver-nfs \
+  --set controller.runOnControlPlane=true \
+  --set controller.strategyType=RollingUpdate \
+  --set externalSnapshotter.enabled=true \
+  --set externalSnapshotter.customResourceDefinitions.enabled=false
+```
+
+Grant additional permissions to the ServiceAccounts:
+
+`oc adm policy add-scc-to-user privileged -z csi-nfs-node-sa -n csi-driver-nfs`
+
+`oc adm policy add-scc-to-user privileged -z csi-nfs-controller-sa -n csi-driver-nfs`
+
+Create a StorageClass:
+
+`oc apply -f 
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nfs-csi
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: nfs.csi.k8s.io
+parameters:
+  server: 10.10.42.20   ### NFS server's IP/FQDN
+  share: /volume1/nfs_ds/ocp             ### NFS server's exported directory
+  subDir: ${pvc.metadata.namespace}-${pvc.metadata.name}-${pv.metadata.name}  ### Folder/subdir name template
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+```
+
+Create a SnapshotClass:
+
+```yaml
+---
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+deletionPolicy: Delete
+driver: nfs.csi.k8s.io
+metadata:
+  name: csi-nfs-snapclass
+```
+
+Set the StorageClass to `default`:
+
+`oc annotate storageclass/nfs-csi storageclass.kubernetes.io/is-default-class=true`
 
 ### OpenShift NFS Provisioner Template
 
