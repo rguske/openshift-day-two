@@ -31,11 +31,19 @@
     - [NFS CSI Driver](#nfs-csi-driver)
     - [OpenShift NFS Provisioner Template](#openshift-nfs-provisioner-template)
     - [Deploying a Test-workload](#deploying-a-test-workload)
+    - [Local Storage](#local-storage)
   - [USB Client Passthrough](#usb-client-passthrough)
     - [Adjust the VM Configuration (specs)](#adjust-the-vm-configuration-specs)
     - [Identify USB Vendor and Product ID](#identify-usb-vendor-and-product-id)
     - [Connect to your VM using `virtctl`](#connect-to-your-vm-using-virtctl)
     - [Start redirecting the USB Device](#start-redirecting-the-usb-device)
+  - [Backup and restore OpenShift Cluster](#backup-and-restore-openshift-cluster)
+    - [Creating automated etcd backups](#creating-automated-etcd-backups)
+  - [Load-aware rebalancing using the Kubernetes Descheduler](#load-aware-rebalancing-using-the-kubernetes-descheduler)
+  - [Pod with external NetworkAccess](#pod-with-external-networkaccess)
+  - [Egress IP](#egress-ip)
+  - [VirtualMachinePool (VMPool)](#virtualmachinepool-vmpool)
+  - [NFS Volume Mount](#nfs-volume-mount)
 
 
 ## OpenShift Identity Providers
@@ -111,7 +119,7 @@ To use the identity provider, you must define an OpenShift Container Platform Se
 
 ```shell
 oc create secret generic ldap-secret \
-    --from-literal='r3dh4t1!' \
+    --from-literal=bindPassword='r3dh4t1!' \
     -n openshift-config
 ```
 
@@ -158,9 +166,10 @@ Choose format: .PFX (with private key), or .CER (public cert only).
 Validate the bind user and the appropriate configuration using `ldapsearch`:
 
 ```shell
-ldapsearch -x -H ldap://w2k19-dc.rguske.coe.muc.redhat.com -D sa-ldap-bind \
-    -b "DC=rguske,DC=coe,DC=muc,DC=redhat,DC=com" \
-    -W '(sAMAccountName=rguske)'
+ldapsearch -x -H ldap://jarvisnas.jarvis.lab \
+-D "uid=root,cn=users,dc=ldap,dc=jarvis,dc=lab" \
+-b "dc=ldap,dc=jarvis,dc=lab" \
+-W "(objectClass=*)"
 ```
 
 #### Creating the CR
@@ -775,7 +784,6 @@ Configure the Operator using `oc edit configs.imageregistry.operator.openshift.i
       secretName: public-route-tls
 ```
 
-
 ## Quick NFS Storage
 
 ### Install the NFS Server
@@ -860,7 +868,7 @@ Grant additional permissions to the ServiceAccounts:
 
 Create a StorageClass:
 
-`oc apply -f 
+`oc apply -f https://raw.githubusercontent.com/rguske/openshift-day-two/refs/heads/main/manifests/nfs-storageclass.yaml`
 
 ```yaml
 apiVersion: storage.k8s.io/v1
@@ -880,6 +888,8 @@ allowVolumeExpansion: true
 ```
 
 Create a SnapshotClass:
+
+`oc apply -f https://raw.githubusercontent.com/rguske/openshift-day-two/refs/heads/main/manifests/nfs-volumesnapshotclass.yaml`
 
 ```yaml
 ---
@@ -1126,6 +1136,50 @@ spec:
 EOF
 ```
 
+### Local Storage
+
+Option 1:
+
+[Installing the Local Storage Operator](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/storage/configuring-persistent-storage#local-storage-install_persistent-storage-local)
+
+Option 2:
+
+[Logical Volume Manager Storage installation](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/storage/configuring-persistent-storage)
+
+Installation via yaml:
+
+`oc apply -f https://raw.githubusercontent.com/rguske/openshift-day-two/refs/heads/main/manifests/lvm-storage-operator.yaml`
+
+Via Operator [Web Console](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/storage/configuring-persistent-storage#lvms-installing-lvms-with-web-console_logical-volume-manager-storage)
+
+Install the Logical Volume Cluster only including the SSD with the `by-path` identifier:
+
+`ls -li /dev/disk/by-path`
+
+`oc apply -f https://raw.githubusercontent.com/rguske/openshift-day-two/refs/heads/main/manifests/lvmcluster.yaml`
+
+Create a test `pvc`:
+
+```yaml
+oc create -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lvm-block-1
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Block
+  resources:
+    requests:
+      storage: 10Gi
+    limits:
+      storage: 20Gi
+  storageClassName: lvms-vg1
+EOF
+```
+
 ## USB Client Passthrough
 
 Not supported in Red Hat OpenShift Virtualization!
@@ -1211,4 +1265,396 @@ Using `lsusb` will show the connected device:
 Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
 Bus 001 Device 009: ID 0e8d:1806 MediaTek Inc. Samsung SE-208 Slim Portable DVD Writer
 Bus 002 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+```
+
+## Backup and restore OpenShift Cluster
+
+- [Official Docs for 4.19](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/control-plane-backup-and-restore#backing-up-etcd-data_backup-etcd)
+
+```code
+oc debug --as-root node/ocp-mk1.jarvis.lab
+
+To use host binaries, run `chroot /host`. Instead, if you need to access host namespaces, run `nsenter -a -t 1`.
+Pod IP: 192.168.42.2
+If you don't see a command prompt, try pressing enter.
+sh-5.1#
+```
+
+- Change your root directory to `/host` in the debug shell:
+
+```code
+chroot /host
+```
+
+- If proxy is in use:
+
+```code
+export HTTP_PROXY=http://<your_proxy.example.com>:8080
+export HTTPS_PROXY=https://<your_proxy.example.com>:8080
+export NO_PROXY=<example.com>
+```
+
+- Run the `cluster-backup.sh` script:
+
+> The cluster-backup.sh script is maintained as a component of the etcd Cluster Operator and is a wrapper around the etcdctl snapshot save command.
+
+```code
+/usr/local/bin/cluster-backup.sh /home/core/assets/backup
+
+Starting pod/ocp-mk1jarvislab-debug-t6x4m ...
+To use host binaries, run `chroot /host`. Instead, if you need to access host namespaces, run `nsenter -a -t 1`.
+Pod IP: 192.168.42.2
+If you don't see a command prompt, try pressing enter.
+sh-5.1# chroot /host
+sh-5.1# /usr/local/bin/cluster-backup.sh /home/core/assets/backup
+Certificate /etc/kubernetes/static-pod-certs/configmaps/etcd-all-bundles/server-ca-bundle.crt is missing. Checking in different directory
+Certificate /etc/kubernetes/static-pod-resources/etcd-certs/configmaps/etcd-all-bundles/server-ca-bundle.crt found!
+found latest kube-apiserver: /etc/kubernetes/static-pod-resources/kube-apiserver-pod-14
+found latest kube-controller-manager: /etc/kubernetes/static-pod-resources/kube-controller-manager-pod-5
+found latest kube-scheduler: /etc/kubernetes/static-pod-resources/kube-scheduler-pod-5
+found latest etcd: /etc/kubernetes/static-pod-resources/etcd-pod-2
+56518b777f31c161916f516b21725a562461218761fbf03224014afd83c3e589
+etcdctl version: 3.5.21
+API version: 3.5
+{"level":"info","ts":"2025-09-15T08:35:18.813919Z","caller":"snapshot/v3_snapshot.go:65","msg":"created temporary db file","path":"/home/core/assets/backup/snapshot_2025-09-15_083517.db.part"}
+{"level":"info","ts":"2025-09-15T08:35:18.823486Z","logger":"client","caller":"v3@v3.5.21/maintenance.go:212","msg":"opened snapshot stream; downloading"}
+{"level":"info","ts":"2025-09-15T08:35:18.823575Z","caller":"snapshot/v3_snapshot.go:73","msg":"fetching snapshot","endpoint":"https://192.168.42.2:2379"}
+{"level":"info","ts":"2025-09-15T08:35:21.367146Z","logger":"client","caller":"v3@v3.5.21/maintenance.go:220","msg":"completed snapshot read; closing"}
+{"level":"info","ts":"2025-09-15T08:35:22.483373Z","caller":"snapshot/v3_snapshot.go:88","msg":"fetched snapshot","endpoint":"https://192.168.42.2:2379","size":"289 MB","took":"3 seconds ago"}
+{"level":"info","ts":"2025-09-15T08:35:22.484415Z","caller":"snapshot/v3_snapshot.go:97","msg":"saved","path":"/home/core/assets/backup/snapshot_2025-09-15_083517.db"}
+Snapshot saved at /home/core/assets/backup/snapshot_2025-09-15_083517.db
+{"hash":2597648169,"revision":49148119,"totalKey":15553,"totalSize":288808960}
+snapshot db and kube resources are successfully saved to /home/core/assets/backup
+```
+
+- Two files saved into `/home/core/assets/backup`
+
+```code
+ls /home/core/assets/backup
+snapshot_2025-09-15_083517.db  static_kuberesources_2025-09-15_083517.tar.gz
+```
+
+- snapshot_<datetimestamp>.db: This file is the etcd snapshot. The cluster-backup.sh script confirms its validity.
+- static_kuberesources_<datetimestamp>.tar.gz: This file contains the resources for the static pods. If etcd encryption is enabled, it also contains the encryption keys for the etcd snapshot.
+
+### Creating automated etcd backups
+
+[Official docs for 4.19](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/backup_and_restore/control-plane-backup-and-restore#creating-automated-etcd-backups_backup-etcd)
+
+- Example Executed Once:
+
+```yaml
+apiVersion: config.openshift.io/v1
+kind: FeatureGate
+metadata:
+  name: cluster
+spec:
+  featureSet: TechPreviewNoUpgrade
+```
+
+```yaml
+apiVersion: operator.openshift.io/v1alpha1
+kind: EtcdBackup
+metadata:
+  name: etcd-single-backup
+  namespace: openshift-etcd
+spec:
+  pvcName: etcd-backup-pvc
+```
+
+- Example Scheduled Executions
+
+```yaml
+apiVersion: config.openshift.io/v1alpha1
+kind: Backup
+metadata:
+  name: etcd-recurring-backup
+spec:
+  etcd:
+    schedule: "20 4 * * *"
+    timeZone: "UTC"
+    pvcName: etcd-backup-pvc
+```
+
+## Load-aware rebalancing using the Kubernetes Descheduler
+
+[Official Docs for 4.19](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/nodes/controlling-pod-placement-onto-nodes-scheduling#descheduler)
+
+> You can benefit from descheduling running pods in situations such as the following:
+>
+> - Nodes are underutilized or overutilized.
+> - Pod and node affinity requirements, such as taints or labels, have changed and the original scheduling decisions are no longer appropriate for certain nodes.
+> - Node failure requires pods to be moved.
+> - New nodes are added to clusters.
+> - Pods have been restarted too many times.
+
+The KubeDescheduler can be installed via the OpertorHub or via appropriate manifest files:
+
+```yaml
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-kube-descheduler-operator
+  namespace: openshift-kube-descheduler-operator
+spec:
+  targetNamespaces:
+  - openshift-kube-descheduler-operator
+  upgradeStrategy: Default
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  labels:
+    operators.coreos.com/cluster-kube-descheduler-operator.openshift-kube-descheduler-op: ""
+  name: cluster-kube-descheduler-operator
+  namespace: openshift-kube-descheduler-operator
+spec:
+  channel: stable
+  installPlanApproval: Automatic
+  name: cluster-kube-descheduler-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+```
+
+The following configuration will evict long-running pods and balances resource usage between nodes.
+
+See further profile specific info here: [LifecycleAndUtilization](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/nodes/controlling-pod-placement-onto-nodes-scheduling#descheduler)
+
+```yaml
+apiVersion: operator.openshift.io/v1
+kind: KubeDescheduler
+metadata:
+  name: cluster
+  namespace: openshift-kube-descheduler-operator
+spec:
+  logLevel: Normal
+  mode: Automatic
+  operatorLogLevel: Normal
+  deschedulingIntervalSeconds: 3600
+  profileCustomizations:
+    devActualUtilizationProfile: PrometheusCPUCombined
+    devDeviationThresholds: AsymmetricLow
+    devEnableSoftTainter: true
+  profiles:
+    - LifecycleAndUtilization
+    - EvictPodsWithPVC
+    - EvictPodsWithLocalStorage
+  managementState: Managed
+```
+
+## Pod with external NetworkAccess
+
+Working example:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rhel-support-tools-localnet-50
+  namespace: default
+  annotations:
+    k8s.v1.cni.cncf.io/networks: |
+      [{
+        "name": "localnet-50",
+        "interface": "net1",
+        "ips": [ "192.168.xxx.xxx/24" ],
+        "gateway": [ "192.168.xxx.1" ],
+        "default-route": ["192.168.xxx.1"]
+      }]
+spec:
+  containers:
+  - name: rhel-support-tools
+    image: registry.redhat.io/rhel9/support-tools:9.7
+    command: ["/bin/bash","-c","sleep infinity"]
+```
+
+## Egress IP
+
+`Node --> Pod (EgressIP) --curl--> external Webserver`
+
+- install Podman on your jumphost
+
+```code
+sudo install -y podman
+```
+
+- start a simple nginx pod:
+
+```code
+podman run -ti --rm -p 8080:8080 quay.io/openshift-examples/simple-http-server:latest
+```
+
+- configure the RHEL firewall:
+
+```code
+sudo firewall-cmd --permanent --zone=public --add-port=8080/tcp
+```
+
+- Egress for worker nodes:
+
+```code
+oc get nodes -l node-role.kubernetes.io/worker
+
+ocp-mk42-cp1.jarvislab.guske.io
+ocp-mk42-cp2.jarvislab.guske.io
+```
+
+- Label the worker nodes:
+
+```code
+for node in $(oc get nodes -o jsonpath='{.items[*].metadata.name}'); do echo ${node} ; oc label node/${node}  k8s.ovn.org/egress-assignable="" ; done
+```
+
+- Create Egress object:
+
+```yaml
+oc apply -f - <<EOF
+apiVersion: k8s.ovn.org/v1
+kind: EgressIP
+metadata:
+  name: egress-poc
+spec:
+  egressIPs:
+  - 192...
+  namespaceSelector:
+    matchLabels:
+      egress: poc
+EOF
+```
+
+- rollout a test deployment
+
+```code
+oc new-project poc-egress
+
+oc apply -k git@github.com:openshift-examples/kustomize/components/simple-http-server
+
+oc rsh deployment/simple-http-server
+curl -i http://192.168...:8080
+```
+
+- label the namespace:
+
+```code
+oc label namespace/poc-egress egress=poc
+```
+
+## VirtualMachinePool (VMPool)
+
+```yaml
+apiVersion: pool.kubevirt.io/v1alp1
+kind: VirtualMachinePool
+metadata:
+  name: vm-pool-cirros
+  namespace: eventing
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      kubevirt.io/vmpool: vm-pool-cirros
+  virtualMachineTemplate:
+    metadata:
+      labels:
+        kubevirt.io/vmpool: vm-pool-cirros
+    spec:
+      template:
+        metadata:
+          labels:
+            kubevirt.io/vmpool: vm-pool-cirros
+        spec:
+          domain:
+            devices:
+              disks:
+                - disk:
+                    bus: virtio
+                  name: containerdisk
+            resources:
+              requests:
+                memory: 128Mi
+          volumes:
+            - containerDisk:
+                image: 'docker.io/kubevirt/cirros-container-disk-demo:latest'
+              name: containerdisk
+```
+
+## NFS Volume Mount
+
+- create PV
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-pv
+spec:
+  storageClassName: "storageClass"
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    path: "/fs/ess/group/openshift_test"
+    server: "xxx.xxx.xxx.xxx"
+    readOnly: false
+```
+
+- create pvc
+
+```yaml
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: nfs-pvc
+spec:
+  storageClassName: "storageClass"
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  volumeName: nfs-pv
+```
+
+- create deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nfs-mounter
+  labels:
+    app: nfs-mounter
+spec:
+  selector:
+    matchLabels:
+      app: nfs-mounter
+  template:
+    metadata:
+      annotations:
+        k8s.v1.cni.cncf.io/networks: |
+          [{
+            "name": "localnet-550",
+            "namespace": "default",
+            "interface": "net1",
+            "ips": ["10.xxx.xxx.xxx/23"],
+            "gateway": ["10.xxx.xxx.1"],
+            "default-route": ["10.xxx.xxx.1"],
+            "dns": {"nameservers": ["xxx.xxx.xxx.xxx"]}
+          }]
+      labels:
+        app: nfs-mounter
+    spec:
+      volumes:
+        - name: nfs-vol
+          persistentVolumeClaim:
+            claimName: nfs-pvc
+      containers:
+        - name: app
+          image: registry.redhat.io/rhel9/support-tools:9.7
+          command: ["/bin/sh", "-c", "sleep infinity"]
+          volumeMounts:
+            - mountPath: /mnt/vol1
+              name: nfs-vol
 ```
