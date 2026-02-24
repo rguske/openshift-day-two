@@ -39,11 +39,19 @@
     - [Start redirecting the USB Device](#start-redirecting-the-usb-device)
   - [Backup and restore OpenShift Cluster](#backup-and-restore-openshift-cluster)
     - [Creating automated etcd backups](#creating-automated-etcd-backups)
-  - [Load-aware rebalancing using the Kubernetes Descheduler](#load-aware-rebalancing-using-the-kubernetes-descheduler)
   - [Pod with external NetworkAccess](#pod-with-external-networkaccess)
   - [Egress IP](#egress-ip)
   - [VirtualMachinePool (VMPool)](#virtualmachinepool-vmpool)
   - [NFS Volume Mount](#nfs-volume-mount)
+  - [OpenShift Cluster Monitoring - Also relevant for Workload Availability Operators](#openshift-cluster-monitoring---also-relevant-for-workload-availability-operators)
+  - [Enable User Workload Monitoring - Also relevant for Workload Availability Operators](#enable-user-workload-monitoring---also-relevant-for-workload-availability-operators)
+    - [Configuring metrics for workload availability operators](#configuring-metrics-for-workload-availability-operators)
+  - [Virtualization Workload High-Availability](#virtualization-workload-high-availability)
+    - [Self-Node-Remediation](#self-node-remediation)
+    - [Adjusting the SNR Config](#adjusting-the-snr-config)
+    - [Node-Health-Check](#node-health-check)
+  - [Load-aware rebalancing using the Kubernetes Descheduler](#load-aware-rebalancing-using-the-kubernetes-descheduler)
+    - [Load-aware Rebalancing for Virtual Machines](#load-aware-rebalancing-for-virtual-machines)
 
 
 ## OpenShift Identity Providers
@@ -1376,73 +1384,6 @@ spec:
     pvcName: etcd-backup-pvc
 ```
 
-## Load-aware rebalancing using the Kubernetes Descheduler
-
-[Official Docs for 4.19](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/nodes/controlling-pod-placement-onto-nodes-scheduling#descheduler)
-
-> You can benefit from descheduling running pods in situations such as the following:
->
-> - Nodes are underutilized or overutilized.
-> - Pod and node affinity requirements, such as taints or labels, have changed and the original scheduling decisions are no longer appropriate for certain nodes.
-> - Node failure requires pods to be moved.
-> - New nodes are added to clusters.
-> - Pods have been restarted too many times.
-
-The KubeDescheduler can be installed via the OpertorHub or via appropriate manifest files:
-
-```yaml
----
-apiVersion: operators.coreos.com/v1
-kind: OperatorGroup
-metadata:
-  name: openshift-kube-descheduler-operator
-  namespace: openshift-kube-descheduler-operator
-spec:
-  targetNamespaces:
-  - openshift-kube-descheduler-operator
-  upgradeStrategy: Default
----
-apiVersion: operators.coreos.com/v1alpha1
-kind: Subscription
-metadata:
-  labels:
-    operators.coreos.com/cluster-kube-descheduler-operator.openshift-kube-descheduler-op: ""
-  name: cluster-kube-descheduler-operator
-  namespace: openshift-kube-descheduler-operator
-spec:
-  channel: stable
-  installPlanApproval: Automatic
-  name: cluster-kube-descheduler-operator
-  source: redhat-operators
-  sourceNamespace: openshift-marketplace
-```
-
-The following configuration will evict long-running pods and balances resource usage between nodes.
-
-See further profile specific info here: [LifecycleAndUtilization](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/nodes/controlling-pod-placement-onto-nodes-scheduling#descheduler)
-
-```yaml
-apiVersion: operator.openshift.io/v1
-kind: KubeDescheduler
-metadata:
-  name: cluster
-  namespace: openshift-kube-descheduler-operator
-spec:
-  logLevel: Normal
-  mode: Automatic
-  operatorLogLevel: Normal
-  deschedulingIntervalSeconds: 3600
-  profileCustomizations:
-    devActualUtilizationProfile: PrometheusCPUCombined
-    devDeviationThresholds: AsymmetricLow
-    devEnableSoftTainter: true
-  profiles:
-    - LifecycleAndUtilization
-    - EvictPodsWithPVC
-    - EvictPodsWithLocalStorage
-  managementState: Managed
-```
-
 ## Pod with external NetworkAccess
 
 Working example:
@@ -1657,4 +1598,631 @@ spec:
           volumeMounts:
             - mountPath: /mnt/vol1
               name: nfs-vol
+```
+
+## OpenShift Cluster Monitoring - Also relevant for Workload Availability Operators
+
+Source:
+
+- [Preparing to configure core platform monitoring stack](https://docs.redhat.com/en/documentation/monitoring_stack_for_red_hat_openshift/4.20/html/configuring_core_platform_monitoring/preparing-to-configure-the-monitoring-stack)
+
+Check if Cluster Monitoring exists:
+
+```code
+oc -n openshift-monitoring get configmap cluster-monitoring-config
+```
+
+If not, create the ConfigMap
+
+```yaml
+oc create -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-monitoring-config
+  namespace: openshift-monitoring
+data:
+  config.yaml: |
+EOF
+```
+
+The ConfigMap can be adjusted in order to be compliant with various requirements. Example configuration to specify the resource for the components:
+
+```yaml
+oc apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-monitoring-config
+  namespace: openshift-monitoring
+data:
+  config.yaml: |
+    alertmanagerMain:
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 200m
+          memory: 500Mi
+    prometheusK8s:
+      resources:
+        limits:
+          cpu: 500m
+          memory: 3Gi
+        requests:
+          cpu: 200m
+          memory: 500Mi
+    thanosQuerier:
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 200m
+          memory: 500Mi
+    prometheusOperator:
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 200m
+          memory: 500Mi
+    metricsServer:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 50Mi
+        limits:
+          cpu: 50m
+          memory: 500Mi
+    kubeStateMetrics:
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 200m
+          memory: 500Mi
+    telemeterClient:
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 200m
+          memory: 500Mi
+    openshiftStateMetrics:
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 200m
+          memory: 500Mi
+    nodeExporter:
+      resources:
+        limits:
+          cpu: 50m
+          memory: 150Mi
+        requests:
+          cpu: 20m
+          memory: 50Mi
+    monitoringPlugin:
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 200m
+          memory: 500Mi
+    prometheusOperatorAdmissionWebhook:
+      resources:
+        limits:
+          cpu: 50m
+          memory: 100Mi
+        requests:
+          cpu: 20m
+          memory: 50Mi
+EOF
+```
+
+Storage for the ClusterMonitoring:
+
+> Important
+Do not use a raw block volume, which is described with volumeMode: Block in the PersistentVolume resource. Prometheus cannot use raw block volumes.
+Prometheus does not support file systems that are not POSIX compliant. For example, some NFS file system implementations are not POSIX compliant. If you want to use an NFS file system for storage, verify with the vendor that their NFS implementation is fully POSIX compliant.
+
+Update the ConfigMap:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-monitoring-config
+  namespace: openshift-monitoring
+data:
+  config.yaml: |
+    prometheusK8s:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: kubevirt-odf-replica-two-file
+          resources:
+            requests:
+              storage: 40Gi
+```
+
+The `STS` is updated and the pods were restarted:
+
+```code
+time=2026-02-23T12:22:06.277Z level=INFO source=main.go:1540 msg="Completed loading of configuration file" db_storage=21.822µs remote_storage=4.436µs web_handler=1.538µs query_engine=2.722µs scrape=1.012336ms scrape_sd=97.452214ms notify=687.797µs notify_sd=723.528µs rules=2.504338141s tracing=20.569µs filename=/etc/prometheus/config_out/prometheus.env.yaml totalDuration=2.778510441s
+time=2026-02-23T12:22:06.277Z level=INFO source=main.go:1276 msg="Server is ready to receive web requests."
+time=2026-02-23T12:22:06.278Z level=INFO source=manager.go:176 msg="Starting rule manager..." component="rule manager"
+time=2026-02-23T12:22:07.787Z level=INFO source=main.go:1500 msg="Loading configuration file" filename=/etc/prometheus/config_out/prometheus.env.yaml
+time=2026-02-23T12:22:08.591Z level=INFO source=main.go:1540 msg="Completed loading of configuration file" db_storage=4.525µs remote_storage=4.974µs web_handler=1.836µs query_engine=2.785µs scrape=181.497µs scrape_sd=19.437441ms notify=875.227µs notify_sd=22.636µs rules=734.864806ms tracing=16.288µs filename=/etc/prometheus/config_out/prometheus.env.yaml totalDuration=804.119561ms
+```
+
+## Enable User Workload Monitoring - Also relevant for Workload Availability Operators
+
+Source:
+
+- [Preparing to configure the user workload monitoring stack](https://docs.redhat.com/en/documentation/monitoring_stack_for_red_hat_openshift/4.20/html/configuring_user_workload_monitoring/preparing-to-configure-the-monitoring-stack-uwm)
+
+Edit the cluster-monitoring-config ConfigMap object:
+
+```code
+oc -n openshift-monitoring edit configmap cluster-monitoring-config
+```
+
+Adjust the cm with the following:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-monitoring-config
+  namespace: openshift-monitoring
+data:
+  config.yaml: |
+    enableUserWorkload: true
+```
+
+The `thanos-quierer` pods will be restarted.
+
+Verification:
+
+```code
+oc -n openshift-user-workload-monitoring get pod
+
+NAME                                   READY   STATUS    RESTARTS   AGE
+prometheus-operator-577c9d7bcb-hfpv5   2/2     Running   0          93s
+prometheus-user-workload-0             6/6     Running   0          90s
+prometheus-user-workload-1             6/6     Running   0          90s
+thanos-ruler-user-workload-0           4/4     Running   0          90s
+thanos-ruler-user-workload-1           4/4     Running   0          90s
+```
+
+[Granting users permission to configure monitoring for user-defined projects](https://docs.redhat.com/en/documentation/monitoring_stack_for_red_hat_openshift/4.20/html/configuring_user_workload_monitoring/preparing-to-configure-the-monitoring-stack-uwm#granting-users-permission-to-configure-monitoring-for-user-defined-projects_preparing-to-configure-the-monitoring-stack-uwm)
+
+### Configuring metrics for workload availability operators
+
+How to create a Token for the Metric ServiceMonitor:
+
+```code
+TOKEN="$(oc -n openshift-user-workload-monitoring create token prometheus-user-workload)"
+
+oc -n openshift-workload-availability create secret generic prometheus-user-workload-token \
+  --from-literal=token="$TOKEN"
+```
+
+Obtain the secret:
+
+```code
+oc -n openshift-workload-availability get secret prometheus-user-workload-token -o jsonpath='{.data.token}' | base64 -d
+```
+
+Create the ServiceMonitor:
+
+```yaml
+oc create -f - <<EOF
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: node-healthcheck-metrics-monitor
+  namespace: openshift-workload-availability
+  labels:
+    app.kubernetes.io/component: controller-manager
+spec:
+  endpoints:
+  - interval: 30s
+    port: https
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials:
+        name: prometheus-user-workload-token
+        key: token
+    tlsConfig:
+      ca:
+        configMap:
+          name: node-healthcheck-ca-bundle # ConfigMap name was wrong in our documentation
+          key: service-ca.crt
+      serverName: node-healthcheck-controller-manager-metrics-service.openshift-workload-availability.svc
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: controller-manager
+      app.kubernetes.io/name: node-healthcheck-operator
+      app.kubernetes.io/instance: metrics
+EOF
+```
+
+To confirm that the configuration is successful the Observe > Targets tab in OCP Web UI shows Endpoint Up.
+
+The following are example metrics from the various workload availability operators.
+
+The metrics include information on the following indicators:
+
+- Operator availability: Showing if and when each Operator is up and running.
+- Node remediation count: Showing the number of remediations across the same node, and across all nodes.
+- Node remediation duration: Showing the remediation downtime or recovery time.
+- Node remediation gauge: Showing the number of ongoing remediations.
+
+## Virtualization Workload High-Availability
+
+Sources:
+
+- [OpenShift Virtualization - Fencing and VM High Availability Guide](https://access.redhat.com/articles/7057929)
+- [Node Health Check](https://docs.redhat.com/en/documentation/workload_availability_for_red_hat_openshift/26.1/html/remediation_fencing_and_maintenance/about-remediation-fencing-maintenance#about-remediation-fencing-maintenance-nhc)
+- [Docs: Chapter 2. Using Self Node Remediation](https://docs.redhat.com/en/documentation/workload_availability_for_red_hat_openshift/26.1/html/remediation_fencing_and_maintenance/self-node-remediation-operator-remediate-nodes)
+- [OpenShift Examples](https://examples.openshift.pub/kubevirt/node-health-check/)
+- [mdeik8s on GitHub](https://github.com/medik8s)
+
+### Self-Node-Remediation
+
+> Note
+>
+> - The Self Node Remediation Operator creates the CR by default in the deployment namespace.
+> - The name for the CR must be self-node-remediation-config.
+> - You can only have one SelfNodeRemediationConfig CR.
+> - Deleting the SelfNodeRemediationConfig CR disables Self Node Remediation.
+> - You can edit the self-node-remediation-config CR that is created by the Self Node Remediation Operator.
+
+Create the namespace:
+
+```yaml
+oc create -f - <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-workload-availability
+EOF
+```
+
+Define the OperatorGroup:
+
+```yaml
+oc create -f - <<EOF
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: workload-availability-operator-group
+  namespace: openshift-workload-availability
+EOF
+```
+
+Define the Subscription for Self-Node-Remediation
+
+```yaml
+oc create -f - <<EOF
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+    name: self-node-remediation-operator
+    namespace: openshift-workload-availability
+spec:
+    channel: stable
+    installPlanApproval: Manual
+    name: self-node-remediation-operator
+    source: redhat-operators
+    sourceNamespace: openshift-marketplace
+    package: self-node-remediation
+EOF
+```
+
+Validate the new resources:
+
+```code
+oc get deployment -n openshift-workload-availability
+
+NAME                                               READY   UP-TO-DATE   AVAILABLE   AGE
+node-healthcheck-controller-manager                2/2     2            2           2d17h
+node-healthcheck-node-remediation-console-plugin   1/1     1            1           2d17h
+self-node-remediation-controller-manager           2/2     2            2           3m6s
+```
+
+```code
+oc get selfnoderemediationtemplate -n openshift-workload-availability
+
+NAME                                                AGE
+self-node-remediation-automatic-strategy-template   65s
+```
+
+```code
+oc get csv -n openshift-workload-availability
+
+NAME                                DISPLAY                          VERSION   REPLACES                            PHASE
+node-healthcheck-operator.v0.10.1   Node Health Check Operator       0.10.1    node-healthcheck-operator.v0.10.0   Succeeded
+self-node-remediation.v0.11.0       Self Node Remediation Operator   0.11.0    self-node-remediation.v0.10.2       Succeeded
+```
+
+```code
+oc get selfnoderemediationconfig -n openshift-workload-availability
+
+NAME                           AGE
+self-node-remediation-config   2m55s
+```
+
+```yaml
+oc get SelfNodeRemediationConfig self-node-remediation-config -oyaml
+
+apiVersion: self-node-remediation.medik8s.io/v1alpha1
+kind: SelfNodeRemediationConfig
+metadata:
+  name: self-node-remediation-config
+  namespace: openshift-workload-availability
+spec:
+  apiCheckInterval: 15s
+  apiServerTimeout: 5s
+  hostPort: 30001
+  isSoftwareRebootEnabled: true
+  maxApiErrorThreshold: 3
+  minPeersForRemediation: 1
+  peerApiServerTimeout: 5s
+  peerDialTimeout: 5s
+  peerRequestTimeout: 7s
+  peerUpdateInterval: 15m
+  watchdogFilePath: /dev/watchdog
+```
+
+```code
+oc get daemonset -n openshift-workload-availability
+
+NAME                       DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+self-node-remediation-ds   6         6         6       6            6           <none>          2m50s
+```
+
+### Adjusting the SNR Config
+
+Start adjusting the `SelfNodeRemediationTemplate`. Default is:
+
+```yaml
+oc get selfnoderemediationtemplate -n openshift-workload-availability -oyaml
+apiVersion: v1
+items:
+- apiVersion: self-node-remediation.medik8s.io/v1alpha1
+  kind: SelfNodeRemediationTemplate
+  metadata:
+    annotations:
+      remediation.medik8s.io/multiple-templates-support: "true"
+    creationTimestamp: "2026-02-23T13:58:44Z"
+    generation: 1
+    labels:
+      remediation.medik8s.io/default-template: "true"
+    name: self-node-remediation-automatic-strategy-template
+    namespace: openshift-workload-availability
+    resourceVersion: "5244533"
+    uid: a2672726-7692-454c-8ee9-43d33b1ac473
+  spec:
+    template:
+      spec:
+        remediationStrategy: Automatic
+kind: List
+metadata:
+  resourceVersion: ""
+```
+
+I'll change it from `Automatic` to `OutOfServiceTaint`.
+
+```yaml
+apiVersion: self-node-remediation.medik8s.io/v1alpha1
+kind: SelfNodeRemediationTemplate
+metadata:
+  annotations:
+    remediation.medik8s.io/multiple-templates-support: "true"
+  labels:
+    remediation.medik8s.io/default-template: "true"
+  name: self-node-remediation-automatic-strategy-template
+  namespace: openshift-workload-availability
+spec:
+  template:
+    spec:
+      remediationStrategy: OutOfServiceTaint
+```
+
+| Strategy | Description |
+|----------|-------------|
+| **Automatic** | This remediation strategy simplifies the remediation process by letting the Self Node Remediation Operator decide on the most suitable remediation strategy for the cluster. This strategy checks if the OutOfServiceTaint strategy is available on the cluster. If the OutOfServiceTaint strategy is available, the Operator selects the OutOfServiceTaint strategy. If the OutOfServiceTaint strategy is not available, the Operator selects the ResourceDeletion strategy. Automatic is the default remediation strategy. |
+| **OutOfServiceTaint** | This remediation strategy implicitly causes the removal of the pods and associated volume attachments on the node, rather than the removal of the node object. It achieves this by placing the OutOfServiceTaint strategy on the node. This strategy has been supported on technology preview since OpenShift Container Platform version 4.13, and on general availability since OpenShift Container Platform version 4.15. |
+
+### Node-Health-Check
+
+- [Remediating nodes with Node Health Checks](https://docs.redhat.com/en/documentation/workload_availability_for_red_hat_openshift/26.1/html/remediation_fencing_and_maintenance/node-health-check-operator)
+
+> The Node Health Check Operator detects the health of the nodes in a cluster. The NodeHealthCheck controller creates the NodeHealthCheck custom resource (CR), which defines a set of criteria and thresholds to determine the health of a node.
+
+Important:
+
+> Node:
+>
+> During the upgrade process, nodes in the cluster might become temporarily unavailable and get identified as unhealthy. In the case of worker nodes, when the Operator detects that the cluster is upgrading, it stops remediating new unhealthy nodes to prevent such nodes from rebooting.
+
+Install the Operator via CLI:
+
+```yaml
+oc create -f - <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-workload-availability
+EOF
+```
+
+```yaml
+oc create -f - <<EOF
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: workload-availability-operator-group
+  namespace: openshift-workload-availability
+EOF
+```
+
+```yaml
+oc create -f - <<EOF
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+    name: node-health-check-operator
+    namespace: openshift-workload-availability
+spec:
+    channel: stable
+    installPlanApproval: Manual
+    name: node-health-check-operator
+    source: redhat-operators
+    sourceNamespace: openshift-marketplace
+    package: node-health-check-operator
+EOF
+```
+
+Create a NHC CR:
+
+```yaml
+oc create -f - <<EOF
+apiVersion: remediation.medik8s.io/v1alpha1
+kind: NodeHealthCheck
+metadata:
+  name: worker-availability
+spec:
+  minHealthy: 51%
+  remediationTemplate:
+    apiVersion: self-node-remediation.medik8s.io/v1alpha1
+    kind: SelfNodeRemediationTemplate
+    name: self-node-remediation-automatic-strategy-template
+    namespace: openshift-workload-availability
+  selector:
+    matchExpressions:
+      - key: node-role.kubernetes.io/worker
+        operator: Exists
+        values: []
+  unhealthyConditions:
+    - duration: 2s
+      status: 'False'
+      type: Ready
+    - duration: 2s
+      status: Unknown
+      type: Ready
+EOF
+```
+
+## Load-aware rebalancing using the Kubernetes Descheduler
+
+[Official Docs for 4.19](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/nodes/controlling-pod-placement-onto-nodes-scheduling#descheduler)
+
+> You can benefit from descheduling running pods in situations such as the following:
+>
+> - Nodes are underutilized or overutilized.
+> - Pod and node affinity requirements, such as taints or labels, have changed and the original scheduling decisions are no longer appropriate for certain nodes.
+> - Node failure requires pods to be moved.
+> - New nodes are added to clusters.
+> - Pods have been restarted too many times.
+
+
+The KubeDescheduler can be installed via the OpertorHub or via appropriate manifest files:
+
+```yaml
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-kube-descheduler-operator
+  namespace: openshift-kube-descheduler-operator
+spec:
+  targetNamespaces:
+  - openshift-kube-descheduler-operator
+  upgradeStrategy: Default
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  labels:
+    operators.coreos.com/cluster-kube-descheduler-operator.openshift-kube-descheduler-op: ""
+  name: cluster-kube-descheduler-operator
+  namespace: openshift-kube-descheduler-operator
+spec:
+  channel: stable
+  installPlanApproval: Automatic
+  name: cluster-kube-descheduler-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+```
+
+The following configuration will evict long-running pods and balances resource usage between nodes.
+
+See further profile specific info here: [LifecycleAndUtilization](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/nodes/controlling-pod-placement-onto-nodes-scheduling#descheduler)
+
+```yaml
+apiVersion: operator.openshift.io/v1
+kind: KubeDescheduler
+metadata:
+  name: cluster
+  namespace: openshift-kube-descheduler-operator
+spec:
+  logLevel: Normal
+  mode: Automatic
+  operatorLogLevel: Normal
+  deschedulingIntervalSeconds: 3600
+  profileCustomizations:
+    devActualUtilizationProfile: PrometheusCPUCombined
+    devDeviationThresholds: AsymmetricLow
+    devEnableSoftTainter: true
+  profiles:
+    - LifecycleAndUtilization
+    - EvictPodsWithPVC
+    - EvictPodsWithLocalStorage
+  managementState: Managed
+```
+
+### Load-aware Rebalancing for Virtual Machines
+
+```yaml
+apiVersion: operator.openshift.io/v1
+kind: KubeDescheduler
+metadata:
+  name: cluster
+  namespace: openshift-kube-descheduler-operator
+spec:
+  managementState: Managed
+  deschedulingIntervalSeconds: 30
+  mode: "Automatic"
+  profiles:
+    - KubeVirtRelieveAndMigrate
+  profileCustomizations:
+    devEnableSoftTainter: true
+    devDeviationThresholds: AsymmetricLow
+    devActualUtilizationProfile: PrometheusCPUCombined
+```
+
+The `KubeVirtRelieveAndMigrate` profile requires PSI metrics to be enabled on all worker nodes. You can enable this by applying the following MachineConfig custom resource (CR):
+
+```yaml
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  labels:
+    machineconfiguration.openshift.io/role: worker
+  name: 99-openshift-machineconfig-worker-psi-karg
+spec:
+  kernelArguments:
+    - psi=1
 ```
