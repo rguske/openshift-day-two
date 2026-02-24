@@ -2053,7 +2053,7 @@ spec:
 
 Important:
 
-> Node:
+> Note:
 >
 > During the upgrade process, nodes in the cluster might become temporarily unavailable and get identified as unhealthy. In the case of worker nodes, when the Operator detects that the cluster is upgrading, it stops remediating new unhealthy nodes to prevent such nodes from rebooting.
 
