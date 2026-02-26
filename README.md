@@ -44,6 +44,7 @@
   - [VirtualMachinePool (VMPool)](#virtualmachinepool-vmpool)
   - [NFS Volume Mount](#nfs-volume-mount)
   - [OpenShift Cluster Monitoring - Also relevant for Workload Availability Operators](#openshift-cluster-monitoring---also-relevant-for-workload-availability-operators)
+    - [Resizing a persistent volume](#resizing-a-persistent-volume)
   - [Enable User Workload Monitoring - Also relevant for Workload Availability Operators](#enable-user-workload-monitoring---also-relevant-for-workload-availability-operators)
     - [Configuring metrics for workload availability operators](#configuring-metrics-for-workload-availability-operators)
   - [Virtualization Workload High-Availability](#virtualization-workload-high-availability)
@@ -219,18 +220,24 @@ spec:
 
 ### NTP using Chrony
 
-[Docs - Configuring chrony time service](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/machine_configuration/machine-configs-configure#installation-special-config-chrony_machine-configs-configure)
+Docs: [Configuring chrony time service](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/installation_configuration/installing-customizing#installation-special-config-chrony_installing-customizing)
 
 > You can set the time server and related settings used by the chrony time service (chronyd) by modifying the contents of the `chrony.conf` file.
 
 Create a Butane config including the contents of the `chrony.conf` file. For example, to configure chrony on worker nodes, create a `99-worker-chrony.bu` file.
 
+- Download Butane:
+
+```code
+curl -LO https://mirror.openshift.com/pub/openshift-v4/amd64/clients/butane/v0.26.0-1/butane-amd64
+```
+
 ```yaml
 tee 99-worker-chrony.bu > /dev/null <<'EOF'
 variant: openshift
-version: 4.18.0
+version: 4.20.0
 metadata:
-  name: 99-worker-chrony
+  name: 99-worker-chrony-configuration
   labels:
     machineconfiguration.openshift.io/role: worker
 storage:
@@ -240,7 +247,8 @@ storage:
     overwrite: true
     contents:
       inline: |
-        server 10.10.42.20 iburst
+        pool NTPSERVER iburst
+        pool NTPSERVER iburst
         driftfile /var/lib/chrony/drift
         makestep 1.0 3
         rtcsync
@@ -248,17 +256,21 @@ storage:
 EOF
 ```
 
-Use Butane (`brew install butane`) to generate a MachineConfig object file, 99-worker-chrony.yaml, containing the configuration to be delivered to the nodes:
+- Create the yaml manifest
 
-`butane 99-worker-chrony.bu -o 99-worker-chrony.yaml`
+```code
+butane 99-worker-chrony-configuration.bu -o 99-worker-chrony-configuration.yaml
+```
 
-Apply the config: `oc apply -f 99-worker-chrony.yaml`
+Create the file and wait until all nodes are restarted. Check `MachineConfigPools` for the status.
+
+Apply the config: `oc apply -f 99-worker-chrony-configuration.yaml`
 
 Alternatively to `butane`:
 
 ```code
 chronybase64=$(cat << EOF | base64 -w 0
-server 10.10.42.20 iburst
+server NTPSERVER iburst
 driftfile /var/lib/chrony/drift
 makestep 1.0 3
 rtcsync
@@ -274,7 +286,7 @@ kind: MachineConfig
 metadata:
   labels:
     machineconfiguration.openshift.io/role: worker
-  name: 50-worker-chrony
+  name: 99-worker-chrony
 spec:
   config:
     ignition:
@@ -1762,6 +1774,10 @@ time=2026-02-23T12:22:06.278Z level=INFO source=manager.go:176 msg="Starting rul
 time=2026-02-23T12:22:07.787Z level=INFO source=main.go:1500 msg="Loading configuration file" filename=/etc/prometheus/config_out/prometheus.env.yaml
 time=2026-02-23T12:22:08.591Z level=INFO source=main.go:1540 msg="Completed loading of configuration file" db_storage=4.525µs remote_storage=4.974µs web_handler=1.836µs query_engine=2.785µs scrape=181.497µs scrape_sd=19.437441ms notify=875.227µs notify_sd=22.636µs rules=734.864806ms tracing=16.288µs filename=/etc/prometheus/config_out/prometheus.env.yaml totalDuration=804.119561ms
 ```
+
+### Resizing a persistent volume
+
+Docs: [Resizing a persistent volume](https://docs.redhat.com/en/documentation/monitoring_stack_for_red_hat_openshift/4.20/html/configuring_core_platform_monitoring/storing-and-recording-data#resizing-a-persistent-volume_storing-and-recording-data)
 
 ## Enable User Workload Monitoring - Also relevant for Workload Availability Operators
 
