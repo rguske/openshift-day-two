@@ -2678,10 +2678,53 @@ spec:
           state: present
 ```
 
+- You'll see new ovs-interface
+
 ```code
 oc debug node/ocp-mk42-cp1.jarvislab.guske.io
-ip -details link show
 ovs-vsctl show
+
+sh-5.1# ovs-vsctl show
+57e01f0c-0626-4fa4-9467-b6092aba4dd2
+    Bridge br-data
+        Port eno2
+            Interface eno2
+                type: system
+        Port ovs-vlan51
+            tag: 51
+            Interface ovs-vlan51
+                type: internal
+        Port ovs-vlan50
+            tag: 50
+            Interface ovs-vlan50
+                type: internal
+
+[...]
+```
+
+- These interfaces will also show up as links on Linux
+- The status will be unknown since a virtual interface is not showing a carrier signal
+
+```code
+oc debug node/ocp-mk42-cp1.jarvislab.guske.io
+sh-5.1# ip -br a
+
+lo               UNKNOWN        127.0.0.1/8 ::1/128
+eno1             UP
+eno2             UP
+eno3             DOWN
+eno4             UP
+ovs-system       DOWN
+ovn-k8s-mp0      UNKNOWN        10.129.0.2/23 fe80::858:aff:fe81:2/64
+br-int           DOWN
+genev_sys_6081   UNKNOWN        fe80::a451:c9ff:fe0d:ccf5/64
+eth0.42@eno1     UP
+br-ex            UNKNOWN        192.168....
+
+[...]
+
+ovs-vlan50       UNKNOWN        192.168.50.240/24
+ovs-vlan51       UNKNOWN        192.168.51.240/24
 ```
 
 - Enable `routingViaHost True` as well as `ipForwarding: Global`
