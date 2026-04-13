@@ -52,7 +52,11 @@
     - [Adjusting the SNR Config](#adjusting-the-snr-config)
     - [Node-Health-Check](#node-health-check)
   - [Load-aware rebalancing using the Kubernetes Descheduler](#load-aware-rebalancing-using-the-kubernetes-descheduler)
+    - [Load-aware Rebalancing for Pods](#load-aware-rebalancing-for-pods)
     - [Load-aware Rebalancing for Virtual Machines](#load-aware-rebalancing-for-virtual-machines)
+      - [Testing the KubeDescheduler](#testing-the-kubedescheduler)
+  - [User-Workload Monitoring with Grafana](#user-workload-monitoring-with-grafana)
+  - [Expose MetalLB to other than default MachineNetwork](#expose-metallb-to-other-than-default-machinenetwork)
 
 
 ## OpenShift Identity Providers
@@ -1757,6 +1761,8 @@ metadata:
 data:
   config.yaml: |
     prometheusK8s:
+      retention: 96h
+      retentionSize: 180GB
       volumeClaimTemplate:
         spec:
           storageClassName: kubevirt-odf-replica-two-file
@@ -1896,7 +1902,7 @@ Sources:
 
 ### Self-Node-Remediation
 
-> Note
+> Note:
 >
 > - The Self Node Remediation Operator creates the CR by default in the deployment namespace.
 > - The name for the CR must be self-node-remediation-config.
@@ -2183,6 +2189,8 @@ spec:
   sourceNamespace: openshift-marketplace
 ```
 
+### Load-aware Rebalancing for Pods
+
 The following configuration will evict long-running pods and balances resource usage between nodes.
 
 See further profile specific info here: [LifecycleAndUtilization](https://docs.redhat.com/en/documentation/openshift_container_platform/4.19/html/nodes/controlling-pod-placement-onto-nodes-scheduling#descheduler)
@@ -2241,4 +2249,571 @@ metadata:
 spec:
   kernelArguments:
     - psi=1
+```
+
+#### Testing the KubeDescheduler
+
+- Create a `VirtualMachinePool` in order to schedule mass-VMs:
+
+```yaml
+oc create -f - <<EOF
+apiVersion: pool.kubevirt.io/v1alpha1
+kind: VirtualMachinePool
+metadata:
+  name: vm-pool-cirros
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      kubevirt.io/vmpool: vm-pool-cirros
+  virtualMachineTemplate:
+    metadata:
+      creationTimestamp: null
+      labels:
+        kubevirt.io/vmpool: vm-pool-cirros
+    spec:
+      runStrategy: Always
+      template:
+        metadata:
+          creationTimestamp: null
+          labels:
+            kubevirt.io/vmpool: vm-pool-cirros
+        spec:
+          domain:
+            devices:
+              disks:
+              - disk:
+                  bus: virtio
+                name: containerdisk
+            resources:
+              requests:
+                memory: 128Mi
+          terminationGracePeriodSeconds: 0
+          volumes:
+          - containerDisk:
+              image: docker.io/kubevirt/cirros-container-disk-demo:latest
+            name: containerdisk
+EOF
+```
+
+- Use the following metrics query in order to show VM distribution:
+
+```code
+count by (node) (kubevirt_vmi_info{name=~".*cirros.*", phase="running"})
+```
+
+- This metric shows succeeded VM migration:
+
+```code
+count(kubevirt_vmi_migration_succeeded)
+```
+
+## User-Workload Monitoring with Grafana
+
+- install the Grafana Community Operator in the specific namespace `openshift-user-workload-monitoring`
+
+```code
+oc project openshift-user-workload-monitoring
+oc create sa grafana-sa
+oc adm policy add-cluster-role-to-user cluster-monitoring-view -z grafana-sa
+```
+
+```code
+CREATETOKEN="$(oc -n openshift-user-workload-monitoring create token grafana-sa --duration=8760h)"
+
+oc -n openshift-workload-availability create secret generic prometheus-user-workload-token \
+  --from-literal=token="$CREATETOKEN"
+
+GETTOKEN="$(oc -n openshift-workload-availability get secret grafana-sa-token -o jsonpath='{.data.token}' | base64 -d)"
+```
+
+```code
+TOKEN="$(oc create token grafana-sa --duration=8760h)"
+```
+
+```code
+echo "$TOKEN"
+```
+
+```yaml
+oc create -f - <<EOF
+kind: Secret
+apiVersion: v1
+metadata:
+  name: credentials
+  namespace: openshift-user-workload-monitoring
+stringData:
+  GF_SECURITY_ADMIN_PASSWORD: grafana
+  GF_SECURITY_ADMIN_USER: root
+  PROMETHEUS_TOKEN: '${TOKEN}'
+type: Opaque
+EOF
+```
+
+```yaml
+oc create -f - <<EOF
+apiVersion: grafana.integreatly.org/v1beta1
+kind: Grafana
+metadata:
+  name: grafana
+  labels:
+    dashboards: "grafana"
+    folders: "grafana"
+spec:
+  deployment:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: grafana
+              env:
+                - name: GF_SECURITY_ADMIN_USER
+                  valueFrom:
+                    secretKeyRef:
+                      key: GF_SECURITY_ADMIN_USER
+                      name: credentials
+                - name: GF_SECURITY_ADMIN_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      key: GF_SECURITY_ADMIN_PASSWORD
+                      name: credentials
+  config:
+    auth:
+      disable_login_form: "false"
+      disable_signout_menu: "true"
+    auth.anonymous:
+      enabled: "false"
+    log:
+      level: warn
+      mode: console
+EOF
+```
+
+```code
+oc -n openshift-user-workload-monitoring get pods -l app=grafana
+```
+
+- Expose the `grafana-service` via an OpenShift Route:
+
+```code
+oc -n openshift-user-workload-monitoring create route edge grafana --service=grafana-service --insecure-policy=Redirect
+```
+
+- create our Grafana Datasource, which will connect to `thanos-querier` in the `openshift-monitoring` project and will use the `grafana-sa` service account token that is stored in secret credentials
+
+```yaml
+oc create -f - <<EOF
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: grafana-ds
+  namespace: openshift-user-workload-monitoring
+spec:
+  valuesFrom:
+    - targetPath: "secureJsonData.httpHeaderValue1"
+      valueFrom:
+        secretKeyRef:
+          name: "credentials"
+          key: "PROMETHEUS_TOKEN"
+  instanceSelector:
+    matchLabels:
+      dashboards: "grafana"
+  datasource:
+    name: Prometheus
+    type: prometheus
+    access: proxy
+    url: https://thanos-querier.openshift-monitoring.svc:9091
+    isDefault: true
+    jsonData:
+      "tlsSkipVerify": true
+      "timeInterval": "5s"
+      httpHeaderName1: 'Authorization'
+    secureJsonData:
+      "httpHeaderValue1": "Bearer \${PROMETHEUS_TOKEN}"
+    editable: true
+EOF
+```
+
+```code
+oc -n openshift-user-workload-monitoring get GrafanaDatasource
+```
+
+- create a Grafana dashboard, which will fetch the JSON externally from Github:
+
+```yaml
+oc create -f - <<EOF
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: grafana-dashboard-ocp-v
+  labels:
+    app: grafana
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: grafana
+  folder: "Openshift Virtualization"
+  url: https://raw.githubusercontent.com/leoaaraujo/articles/master/openshift-virtualization-monitoring/files/ocp-v-dashboard.json
+EOF
+```
+
+- Create an additional Grafana dashboard object:
+
+```yaml
+oc create -f - <<EOF
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: grafana-dashboard-ocp-v-lab
+  labels:
+    app: grafana
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: grafana
+  folder: "Openshift Virtualization"
+  url: https://raw.githubusercontent.com/openshift-virtualization/descheduler-psi-evaluation/refs/heads/main/monitoring/json/load_aware_rebalancing.json
+EOF
+```
+
+## Expose MetalLB to other than default MachineNetwork
+
+Client → LoadBalancer IP
+
+- Client sends TCP SYN to <LoadBalancer IP>:<port> <-- This IP is owned by MetalLB
+
+MetalLB has:
+
+- assigned the IP from its pool
+- advertised it on your L2 network (ARP)
+
+L2 delivery to the node (via your VLAN setup):
+
+- Client resolves LB IP → MAC via ARP
+- Switch forwards frame → arrives on:
+- eno2 (tagged VLAN, e.g. VLAN 50)
+
+Frame enters OVS:
+
+- eno2 → br-data
+- OVS forwards it to the correct internal port
+
+MetalLB node receives the packet
+
+- L2 mode
+- One node “owns” the IP
+- Packet is delivered locally to that node’s network stack
+
+Kubernetes Service handling (kube-proxy / OVN)
+
+Now the packet hits:
+
+- LoadBalancer IP → Service
+- externalTrafficPolicy: Cluster (default)
+- Node receives packet
+- Service load-balancing kicks in:
+- kube-proxy (iptables/IPVS) or
+- OVN load balancer
+
+Packet is forwarded to a backend pod:
+
+- Node → Pod (possibly on another node)
+- Source IP is SNATed
+
+Pod receives packet
+
+- TCP SYN arrives at container
+- Application responds with SYN-ACK
+
+
+- NNCP with an `ovs-interface(s)` configuration for MetalLB to communicate to external networks:
+
+```code
+           (VLAN 50,51 tagged)
+                  │
+               eno2
+                  │
+            ┌───────────┐
+            │  br-data  │  (OVS)
+            └───────────┘
+             │        │
+     VLAN 50 │        │ VLAN 51
+             │        │
+     ovs-vlan50   ovs-vlan51
+         │             │
+     192.168.50.240   192.168.51.240
+```
+
+```yaml
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: br-data-ocp-mk42-cp1
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: "ocp-mk42-cp1.jarvislab.guske.io"
+  desiredState:
+    interfaces:
+      - name: eno2
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: false
+        ipv6:
+          enabled: false
+
+      - name: br-data
+        type: ovs-bridge
+        state: up
+        bridge:
+          allow-extra-patch-ports: true
+          options:
+            stp: false
+          port:
+            # trunk uplink
+            - name: eno2
+
+            # access port for VLAN 50
+            - name: ovs-vlan50
+              vlan:
+                mode: access
+                tag: 50
+
+            # access port for VLAN 51 (optional)
+            - name: ovs-vlan51
+              vlan:
+                mode: access
+                tag: 51
+
+      - name: ovs-vlan50
+        type: ovs-interface
+        state: up
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 192.168.50.240
+              prefix-length: 24
+
+      - name: ovs-vlan51
+        type: ovs-interface
+        state: up
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 192.168.51.240
+              prefix-length: 24
+
+    ovn:
+      bridge-mappings:
+        - bridge: br-data
+          localnet: physnet-data
+          state: present
+---
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: br-data-ocp-mk42-cp2
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: "ocp-mk42-cp2.jarvislab.guske.io"
+  desiredState:
+    interfaces:
+      - name: eno2
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: false
+        ipv6:
+          enabled: false
+
+      - name: br-data
+        type: ovs-bridge
+        state: up
+        bridge:
+          allow-extra-patch-ports: true
+          options:
+            stp: false
+          port:
+            # trunk uplink
+            - name: eno2
+
+            # access port for VLAN 50
+            - name: ovs-vlan50
+              vlan:
+                mode: access
+                tag: 50
+
+            # access port for VLAN 51 (optional)
+            - name: ovs-vlan51
+              vlan:
+                mode: access
+                tag: 51
+
+      - name: ovs-vlan50
+        type: ovs-interface
+        state: up
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 192.168.50.241
+              prefix-length: 24
+
+      - name: ovs-vlan51
+        type: ovs-interface
+        state: up
+        ipv4:
+          enabled: true
+          dhcp: false
+          address:
+            - ip: 192.168.51.241
+              prefix-length: 24
+
+    ovn:
+      bridge-mappings:
+        - bridge: br-data
+          localnet: physnet-data
+          state: present
+```
+
+```code
+oc debug node/ocp-mk42-cp1.jarvislab.guske.io
+ip -details link show
+ovs-vsctl show
+```
+
+- Enable `routingViaHost True` as well as `ipForwarding: Global`
+
+```code
+oc patch network.operator cluster -p '{"spec":{"defaultNetwork":{"ovnKubernetesConfig":{"gatewayConfig": {"routingViaHost": true} }}}}' --type=merge
+```
+
+```code
+oc patch network.operator cluster -p '{"spec":{"defaultNetwork":{"ovnKubernetesConfig":{"gatewayConfig":{"ipForwarding": "Global"}}}}}' --type=merge
+```
+
+- Create the IpAddressPool:
+
+```yaml
+```yaml
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: vlan51-ipaddresspool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 192.168.51.201-192.168.51.205
+  autoAssign: true
+  avoidBuggyIPs: true
+  serviceAllocation:
+    namespaces:
+    - test-a
+    priority: 50
+    serviceSelectors:
+    - matchExpressions:
+      - key: l2listener-vlan
+        operator: In
+        values:
+        - "51"
+```
+
+- Create the L2Advertisement:
+
+```yaml
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: l2-adv-vlan50
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - vlan51-ipaddresspool
+```
+
+- Example Deployment:
+
+```yaml
+oc create -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simple-web-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simple-web-app
+  template:
+    metadata:
+      labels:
+        app: simple-web-app
+    spec:
+      containers:
+        - name: nginx
+          image: quay.io/rguske/simple-web-app:v1
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+EOF
+```
+
+- Expose the Service and ensure to set the appropriate label:
+
+```code
+oc expose deployment simple-web-app --type=LoadBalancer --name=simple-web-app-vlan50 --port=80 --target-port=8080 --labels=l2listener-vlan=50
+```
+
+- Validate the communication
+
+```code
+oc get svc
+NAME                    TYPE           CLUSTER-IP       EXTERNAL-IP      PORT(S)             AGE
+simple-web-app-vlan51   LoadBalancer   172.30.155.190   192.168.51.201   80:31145/TCP        2d20h
+```
+
+- Check ICMP from the same network (vlan51 in my case):
+
+```code
+curl -kLi 192.168.51.201
+HTTP/1.1 200 OK
+Server: Werkzeug/3.1.3 Python/3.12.9
+Date: Mon, 13 Apr 2026 07:41:39 GMT
+Content-Type: text/html; charset=utf-8
+Content-Length: 821
+Connection: close
+
+[...]
+```
+
+- The ICMP request can also be seen on the node:
+
+```code
+sh-5.1# tcpdump -i eno2 -nnn -v
+dropped privs to tcpdump
+tcpdump: listening on eno2, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+07:48:49.298849 STP 802.1w, Rapid STP, Flags [Learn, Forward, Agreement], bridge-id a000.f4:e2:c6:67:dd:c1.8003, length 36
+        message-age 1.00s, max-age 20.00s, hello-time 2.00s, forwarding-delay 15.00s
+        root-id 8000.d8:b3:70:76:86:19, root-pathcost 20000, port-role Designated
+07:48:49.557845 IP (tos 0x0, ttl 64, id 40441, offset 0, flags [DF], proto ICMP (1), length 84)
+    192.168.51.192 > 192.168.51.201: ICMP echo request, id 23, seq 4, length 64
+07:48:49.557989 ARP, Ethernet (len 6), IPv4 (len 4), Request who-has 192.168.51.201 tell 192.168.51.240, length 28
+07:48:50.581908 IP (tos 0x0, ttl 64, id 41227, offset 0, flags [DF], proto ICMP (1), length 84)
+    192.168.51.192 > 192.168.51.201: ICMP echo request, id 23, seq 5, length 64
+07:48:50.581998 IP (tos 0xc0, ttl 64, id 48200, offset 0, flags [none], proto ICMP (1), length 112)
+    192.168.51.240 > 192.168.51.192: ICMP redirect 192.168.51.201 to host 192.168.51.201, length 92
+        IP (tos 0x0, ttl 63, id 41227, offset 0, flags [DF], proto ICMP (1), length 84)
+    192.168.51.192 > 192.168.51.201: ICMP echo request, id 23, seq 5, length 64
+07:48:50.616670 ARP, Ethernet (len 6), IPv4 (len 4), Request who-has 192.168.51.201 tell 192.168.51.240, length 28
+07:48:51.298868 STP 802.1w, Rapid STP, Flags [Learn, Forward, Agreement], bridge-id a000.f4:e2:c6:67:dd:c1.8003, length 36
+        message-age 1.00s, max-age 20.00s, hello-time 2.00s, forwarding-delay 15.00s
+        root-id 8000.d8:b3:70:76:86:19, root-pathcost 20000, port-role Designated
 ```
