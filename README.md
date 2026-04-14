@@ -61,6 +61,8 @@
     - [EndpointPublishingStrategies](#endpointpublishingstrategies)
     - [Dedicated Interface for the Ingress Shard](#dedicated-interface-for-the-ingress-shard)
   - [OpenShift Virtualization (KubeVirt) Checkups](#openshift-virtualization-kubevirt-checkups)
+    - [Network Latency Checkup](#network-latency-checkup)
+    - [Storage Checkups](#storage-checkups)
 
 
 ## OpenShift Identity Providers
@@ -3146,6 +3148,8 @@ set-cookie: cbda86f129258df79f6b63217c5fda7e=abbd944bc53d81890ede6449349fcebe; p
 
 A checkup is an automated test workload that allows you to verify if a specific cluster functionality works as expected.
 
+### Network Latency Checkup
+
 - Create a `NetworkAttachmentDefinition` for two projects (vms, vms-2 in my case)
 
 ```yaml
@@ -3177,6 +3181,8 @@ spec:
 
 After this prerequisites exists, one can click on "Install Permissions" in the OpenShift WebConsole --> Virtualization --> Checkups. The button is greyed out as long as no NAD is configured.
 
+**Note**: All checks can configured via CLI. Check the [official docs](https://docs.redhat.com/en/documentation/openshift_container_platform/4.21/html/virtualization/monitoring#virt-latency-checkups)
+
 It'll add a new `ServiceAccount` named vm-latency-checkup-sa...
 
 ```code
@@ -3186,35 +3192,6 @@ builder                 0         93d
 default                 0         93d
 deployer                0         93d
 vm-latency-checkup-sa   0         3m8s
-```
-
-...as well as `ConfigMap`:
-
-```yaml
-kind: ConfigMap
-apiVersion: v1
-metadata:
-  name: vm-latency-checkup-1
-  namespace: vms
-  labels:
-    kiagnose/checkup-type: kubevirt-vm-latency
-data:
-  status.succeeded: 'true'
-  spec.param.targetNode: ocp-mk42-cp2.jarvislab.guske.io
-  status.result.targetNode: ocp-mk42-cp2.jarvislab.guske.io
-  spec.param.networkAttachmentDefinitionNamespace: vms
-  spec.param.sampleDurationSeconds: '5'
-  spec.timeout: 5m
-  status.result.maxLatencyNanoSec: '6209000'
-  status.startTimestamp: '2026-04-14T17:18:23Z'
-  spec.param.sourceNode: ocp-mk42-cp1.jarvislab.guske.io
-  status.result.sourceNode: ocp-mk42-cp1.jarvislab.guske.io
-  status.failureReason: ''
-  status.result.measurementDurationSec: '5'
-  spec.param.networkAttachmentDefinitionName: nad-vlan-50
-  status.result.avgLatencyNanoSec: '2234000'
-  status.result.minLatencyNanoSec: '428000'
-  status.completionTimestamp: '2026-04-14T17:19:34Z'
 ```
 
 ![ocp-virt-checkups](assets/ocp-virt-checkups.png)
@@ -3263,4 +3240,105 @@ metadata:
   namespace: vms
   resourceVersion: "188052432"
   uid: c58d68e0-e792-475a-b395-8408238e5406
+```
+
+### Storage Checkups
+
+You can use a storage checkup to verify that the cluster storage is optimally configured for OpenShift Virtualization.
+
+**Note**: All checks can configured via CLI. Check the [official docs](https://docs.redhat.com/en/documentation/openshift_container_platform/4.21/html/virtualization/monitoring#virt-latency-checkups)
+
+Same as it was for the Network Latency Checkup, permissions first. Click on `Install Permissions` in the WebConsole.
+
+```code
+oc get sa
+NAME                    SECRETS   AGE
+builder                 0         93d
+default                 0         93d
+deployer                0         93d
+storage-checkup-sa      0         106s
+vm-latency-checkup-sa   0         67m
+```
+
+Running the checkup will add resources accordingly:
+
+```code
+oc get pod,pvc,dv,job
+
+NAME                                           READY   STATUS      RESTARTS   AGE
+pod/kubevirt-storage-checkup-1-9942-nt7gq      1/1     Running     0          102s
+pod/virt-launcher-rhel-9-white-fowl-80-m7d47   0/2     Completed   0          30h
+pod/virt-launcher-rhel-9-white-fowl-80-qxdvw   2/2     Running     0          6h10m
+pod/vm-latency-checkup-1-7643-8g7gv            0/1     Completed   0          59m
+
+NAME                                                                    STATUS    VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS             VOLUMEATTRIBUTESCLASS   AGE
+persistentvolumeclaim/persistent-state-for-vmi-under-test-df89f-mlrn8   Pending                                                                        synology-iscsi-storage   <unset>                 12s
+persistentvolumeclaim/rhel-9-white-fowl-80-volume                       Bound     pvc-ff0b8ed4-e328-45e8-851b-ffb41537a714   30Gi       RWX            synology-iscsi-storage   <unset>                 30h
+persistentvolumeclaim/vmi-under-test-df89f-dv                           Bound     pvc-b0128a6d-add3-45d9-b287-99f6427697b0   30Gi       RWX            synology-iscsi-storage   <unset>                 17s
+
+NAME                                                     PHASE       PROGRESS   RESTARTS   AGE
+datavolume.cdi.kubevirt.io/rhel-9-white-fowl-80-volume   Succeeded   100.0%                30h
+datavolume.cdi.kubevirt.io/vmi-under-test-df89f-dv       Succeeded   100.0%                18s
+
+NAME                                        STATUS     COMPLETIONS   DURATION   AGE
+job.batch/kubevirt-storage-checkup-1-9942   Running    0/1           102s       102s
+job.batch/vm-latency-checkup-1-7643         Complete   1/1           74s        59m
+```
+
+Failed Job:
+
+```yaml
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: kubevirt-storage-checkup-1
+  namespace: vms
+  labels:
+    kiagnose/checkup-type: kubevirt-vm-storage
+data:
+  status.result.goldenImagesNotUpToDate: |-
+    openshift-virtualization-os-images/centos-stream9-image-cron
+    openshift-virtualization-os-images/centos-stream10-image-cron
+  status.result.cnvVersion: 4.21.3
+  status.succeeded: 'false'
+  status.result.defaultStorageClass: synology-iscsi-storage
+  status.result.vmHotplugVolume: ''
+  status.result.vmBootFromGoldenImage: 'failed waiting for VMI "vmi-under-test-df89f" successfully booted: timed out waiting for the condition'
+  status.result.storageProfilesWithSmartClone: synology-iscsi-storage
+  status.result.storageProfilesWithEmptyClaimPropertySets: ''
+  spec.timeout: 10m
+  status.startTimestamp: '2026-04-14T18:16:22Z'
+  status.result.storageProfilesWithSpecClaimPropertySets: ''
+  status.result.ocpVersion: 4.21.9
+  status.failureReason: VMI vms/vmi-under-test-df89f is owned by a VM
+  status.result.vmsWithUnsetEfsStorageClass: ''
+  status.result.concurrentVMBoot: ''
+  status.result.vmLiveMigration: 'failed waiting for VMI "vmi-under-test-df89f" migration completed: timed out waiting for the condition'
+  status.result.pvcBound: pvc failed to bound
+  status.result.vmVolumeClone: 'DV cloneType: "csi-clone"'
+  status.result.storageProfileMissingVolumeSnapshotClass: ''
+  status.result.vmsWithNonVirtRbdStorageClass: ''
+  status.result.goldenImagesNoDataSource: ''
+  status.result.storageProfilesWithRWX: synology-iscsi-storage
+  status.completionTimestamp: '2026-04-14T18:23:42Z'
+```
+
+In my case, there's indeed something wrong with the centos9 Golden Image:
+
+```code
+oc -n openshift-virtualization-os-images get dv
+NAME                           PHASE       PROGRESS   RESTARTS   AGE
+centos-stream10-40669a406f49               N/A                   39d
+centos-stream10-5db94eb365eb   Succeeded   100.0%                70d
+centos-stream10-8adef4f5457b   Succeeded   100.0%                83d
+centos-stream10-da2ffd43fa26   Succeeded   100.0%                76d
+centos-stream9-0e16ba1cf6c9    Succeeded   100.0%                69d
+centos-stream9-2e68de8fe816                N/A                   39d
+centos-stream9-4c67dd12e190    Succeeded   100.0%                82d
+centos-stream9-86bfc3da3797    Succeeded   100.0%                75d
+fedora-68ed96832eca            Succeeded   100.0%                97d
+rhel10-c03936a065f2            Succeeded   100.0%     1          97d
+rhel8-004e24cfacec             Succeeded   100.0%     1          89d
+rhel8-4ccd8b6aee47             Succeeded   100.0%     1          97d
+rhel9-ab4ec16077fe             Succeeded   100.0%     1          97d
 ```
