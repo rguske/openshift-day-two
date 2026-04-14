@@ -63,6 +63,7 @@
   - [OpenShift Virtualization (KubeVirt) Checkups](#openshift-virtualization-kubevirt-checkups)
     - [Network Latency Checkup](#network-latency-checkup)
     - [Storage Checkups](#storage-checkups)
+    - [kubevirt-realtime-checkup](#kubevirt-realtime-checkup)
 
 
 ## OpenShift Identity Providers
@@ -3342,3 +3343,9 @@ rhel8-004e24cfacec             Succeeded   100.0%     1          89d
 rhel8-4ccd8b6aee47             Succeeded   100.0%     1          97d
 rhel9-ab4ec16077fe             Succeeded   100.0%     1          97d
 ```
+
+### kubevirt-realtime-checkup
+
+Checkout this repository for an automated test checking the readiness of a KubeVirt cluster to run virtualized realtime workloads.
+
+--> [kubevirt-realtime-checkup](https://github.com/kiagnose/kubevirt-realtime-checkup)
