@@ -57,6 +57,10 @@
       - [Testing the KubeDescheduler](#testing-the-kubedescheduler)
   - [User-Workload Monitoring with Grafana](#user-workload-monitoring-with-grafana)
   - [Expose MetalLB to other than default MachineNetwork](#expose-metallb-to-other-than-default-machinenetwork)
+  - [Ingress Sharding](#ingress-sharding)
+    - [EndpointPublishingStrategies](#endpointpublishingstrategies)
+    - [Dedicated Interface for the Ingress Shard](#dedicated-interface-for-the-ingress-shard)
+  - [OpenShift Virtualization (KubeVirt) Checkups](#openshift-virtualization-kubevirt-checkups)
 
 
 ## OpenShift Identity Providers
@@ -2545,6 +2549,7 @@ Pod receives packet
 ```
 
 ```yaml
+oc create -f - <<EOF
 apiVersion: nmstate.io/v1
 kind: NodeNetworkConfigurationPolicy
 metadata:
@@ -2676,6 +2681,7 @@ spec:
         - bridge: br-data
           localnet: physnet-data
           state: present
+EOF
 ```
 
 - You'll see new ovs-interface
@@ -2740,7 +2746,7 @@ oc patch network.operator cluster -p '{"spec":{"defaultNetwork":{"ovnKubernetesC
 - Create the IpAddressPool:
 
 ```yaml
-```yaml
+oc create -f - <<EOF
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
@@ -2761,11 +2767,13 @@ spec:
         operator: In
         values:
         - "51"
+EOF
 ```
 
 - Create the L2Advertisement:
 
 ```yaml
+oc create -f - <<EOF
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
@@ -2774,6 +2782,7 @@ metadata:
 spec:
   ipAddressPools:
   - vlan51-ipaddresspool
+EOF
 ```
 
 - Example Deployment:
@@ -2859,4 +2868,399 @@ tcpdump: listening on eno2, link-type EN10MB (Ethernet), snapshot length 262144 
 07:48:51.298868 STP 802.1w, Rapid STP, Flags [Learn, Forward, Agreement], bridge-id a000.f4:e2:c6:67:dd:c1.8003, length 36
         message-age 1.00s, max-age 20.00s, hello-time 2.00s, forwarding-delay 15.00s
         root-id 8000.d8:b3:70:76:86:19, root-pathcost 20000, port-role Designated
+```
+
+## Ingress Sharding
+
+- Common Use Cases
+  - Internal vs external traffic separation
+  - Blue/green or canary router setups
+  - Dedicated routers for high-security apps
+  - Different TLS / wildcard domains
+
+- [Official Docs](https://docs.redhat.com/en/documentation/openshift_container_platform/4.21/html/ingress_and_load_balancing/configuring-ingress-cluster-traffic#nw-ingress-sharding-concept_configuring-ingress-cluster-traffic-ingress-controller)
+
+> Ingress Controller sharding is useful when balancing incoming traffic load among a set of Ingress Controllers and when isolating traffic to a specific Ingress Controller. For example, company A goes to one Ingress Controller and company B to another.
+
+> Important: You must keep all of OpenShift Container Platform’s administration routes on the same Ingress Controller. Therefore, avoid adding additional selectors to the default Ingress Controller that exclude these essential routes.
+
+- create a new project:
+
+```code
+oc new-project ingress-sharding-no-lb
+```
+
+### EndpointPublishingStrategies
+
+```yaml
+endpointPublishingStrategy:
+  type: HostNetwork
+```
+
+This forces each router pod to bind host ports 80 and 443 directly on the node.
+
+Kubernetes scheduler enforces:
+
+> Only one pod per node can bind a given host port.
+
+With HostNetwork:
+
+You cannot run multiple routers on the same node unless they use different ports (which OpenShift routers do not support).
+
+I'd suggest going with either `NodePortService` or prefered `LoadBalancerService`!
+
+### Dedicated Interface for the Ingress Shard
+
+I'd like to achieve that the new Ingress Controller (sharded ingress) is using a specific interface. Therefore, I've used the `nncp` configuration which I've used in [this section](#expose-metallb-to-other-than-default-machinenetwork).
+
+Important to mention is the topic [AsymetricRouting](https://access.redhat.com/solutions/7117243).
+
+- Create the `IpAddressPool`:
+
+```yaml
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: vlan51-ipaddresspool-ingress-sharding
+  namespace: metallb-system
+spec:
+  addresses:
+    - 192.168.51.206-192.168.51.210
+  autoAssign: true
+  avoidBuggyIPs: true
+  serviceAllocation:
+    namespaces:
+      - openshift-ingress
+```
+
+- Create the `L2Advertisement` accordingly
+- Important! Bind the L2Adv. to a specific interface:
+
+```yaml
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: l2adv-vlan51-ipaddresspool-ingress-sharding
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - vlan51-ipaddresspool-ingress-sharding
+```
+
+- Create an IngressController object which will be used for the new `route`
+- The Ingress Controller selects routes using a `routeSelector`
+
+```yaml
+oc apply -f - <<EOF
+apiVersion: operator.openshift.io/v1
+kind: IngressController
+metadata:
+  name: sharded-router-no-lb
+  namespace: openshift-ingress-operator
+spec:
+  domain: my-sharded-domain.retroplay.guske.io
+  nodePlacement:
+    nodeSelector:
+      matchLabels:
+        node-role.kubernetes.io/worker: ""
+    routeSelector:
+      matchLabels:
+        type: sharded
+  endpointPublishingStrategy:
+    type: LoadBalancerService
+EOF
+```
+
+```code
+oc get pods -n openshift-ingress -o wide | grep sharded-router-no-lb
+router-sharded-router-no-lb-6d8c6bdf59-7ff2j   1/1     Running   0          5m38s   10.129.0.233   ocp-mk42-cp1.jarvislab.guske.io   <none>           <none>
+router-sharded-router-no-lb-6d8c6bdf59-qzjqb   1/1     Running   0          5m38s   10.130.1.31    ocp-mk42-cp2.jarvislab.guske.io   <none>           <none>
+```
+
+```code
+oc -n openshift-ingress-operator get ingresscontrollers.operator.openshift.io
+NAME                   AGE
+default                98d
+sharded-router-no-lb   34s
+```
+
+```code
+oc get svc -n openshift-ingress
+NAME                                   TYPE           CLUSTER-IP       EXTERNAL-IP      PORT(S)                      AGE
+router-internal-default                ClusterIP      172.30.62.65     <none>           80/TCP,443/TCP,1936/TCP      98d
+router-internal-sharded-router-no-lb   ClusterIP      172.30.178.216   <none>           80/TCP,443/TCP,1936/TCP      8s
+router-sharded-router-no-lb            LoadBalancer   172.30.231.186   192.168.51.206   80:31519/TCP,443:32731/TCP   8s
+```
+
+- Configure your DNS properly with the assigned IP
+
+```code
+dig +short test.my-sharded-domain.retroplay.guske.io
+192.168.51.206
+```
+
+- You can optionally force a specific pool via annotation:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: router-sharded-router
+  namespace: openshift-ingress
+  annotations:
+    metallb.universe.tf/address-pool: vlan51-ipaddresspool-ingress-sharding
+```
+
+- Deploy an example application
+- important is the label for the `route` object: `type=sharded`
+  - this is what we've specified in the Ingress object
+
+```yaml
+oc apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simple-web-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simple-web-app
+  template:
+    metadata:
+      labels:
+        app: simple-web-app
+    spec:
+      containers:
+        - name: nginx
+          image: quay.io/rguske/simple-web-app:v1
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simple-web-app
+spec:
+  type: ClusterIP
+  selector:
+    app: simple-web-app
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: simple-web-app-route
+  labels:
+    type: sharded
+spec:
+  to:
+    name: simple-web-app
+    weight: 100
+    kind: Service
+  host: simple-web-app.my-sharded-domain.retroplay.guske.io
+  path: ''
+  tls:
+    insecureEdgeTerminationPolicy: Redirect
+    termination: edge
+  port:
+    targetPort: 8080
+EOF
+```
+
+```code
+oc get deploy,svc,route
+NAME                             READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/simple-web-app   1/1     1            1           77m
+
+NAME                     TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)    AGE
+service/simple-web-app   ClusterIP   172.30.129.154   <none>        8080/TCP   77m
+
+NAME                                            HOST/PORT                                                        PATH   SERVICES         PORT   TERMINATION     WILDCARD
+route.route.openshift.io/simple-web-app-route   simple-web-app.my-sharded-domain.retroplay.guske.io ... 1 more          simple-web-app   8080   edge/Redirect   None
+```
+
+- Validate:
+
+```code
+dig +short simple-web-app.my-sharded-domain.retroplay.guske.io
+192.168.51.206
+```
+
+```json
+oc get route/simple-web-app-route -o json | jq '.status.ingress'
+[
+  {
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-04-14T08:34:39Z",
+        "status": "True",
+        "type": "Admitted"
+      }
+    ],
+    "host": "simple-web-app.my-sharded-domain.retroplay.guske.io",
+    "routerCanonicalHostname": "router-sharded-router-no-lb.my-sharded-domain.retroplay.guske.io",
+    "routerName": "sharded-router-no-lb",
+    "wildcardPolicy": "None"
+  },
+  {
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-04-14T08:34:39Z",
+        "status": "True",
+        "type": "Admitted"
+      }
+    ],
+    "host": "simple-web-app.my-sharded-domain.retroplay.guske.io",
+    "routerCanonicalHostname": "router-default.apps.ocp-mk42.retroplay.guske.io",
+    "routerName": "default",
+    "wildcardPolicy": "None"
+  }
+]
+```
+
+- test from a system which is on the same subnet
+
+```code
+curl -kI https://simple-web-app.my-sharded-domain.retroplay.guske.io
+HTTP/1.1 200 OK
+server: Werkzeug/3.1.3 Python/3.12.9
+date: Tue, 14 Apr 2026 16:40:49 GMT
+content-type: text/html; charset=utf-8
+content-length: 821
+set-cookie: cbda86f129258df79f6b63217c5fda7e=abbd944bc53d81890ede6449349fcebe; path=/; HttpOnly; Secure; SameSite=None
+```
+
+## OpenShift Virtualization (KubeVirt) Checkups
+
+[Chapter 14. Monitoring](https://docs.redhat.com/en/documentation/openshift_container_platform/4.21/html/virtualization/monitoring#virt-measuring-latency-vm-secondary-network_virt-running-cluster-checkups)
+
+A checkup is an automated test workload that allows you to verify if a specific cluster functionality works as expected.
+
+- Create a `NetworkAttachmentDefinition` for two projects (vms, vms-2 in my case)
+
+```yaml
+apiVersion: k8s.ovn.org/v1
+kind: ClusterUserDefinedNetwork
+metadata:
+  name: nad-50
+spec:
+  namespaceSelector:
+    matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: In
+        values:
+          - vms-2
+          - vms
+  network:
+    localnet:
+      ipam:
+        mode: Disabled
+      mtu: 1500
+      physicalNetworkName: physnet-data
+      role: Secondary
+      vlan:
+        access:
+          id: 50
+        mode: Access
+    topology: Localnet
+```
+
+After this prerequisites exists, one can click on "Install Permissions" in the OpenShift WebConsole --> Virtualization --> Checkups. The button is greyed out as long as no NAD is configured.
+
+It'll add a new `ServiceAccount` named vm-latency-checkup-sa...
+
+```code
+oc get sa
+NAME                    SECRETS   AGE
+builder                 0         93d
+default                 0         93d
+deployer                0         93d
+vm-latency-checkup-sa   0         3m8s
+```
+
+...as well as `ConfigMap`:
+
+```yaml
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: vm-latency-checkup-1
+  namespace: vms
+  labels:
+    kiagnose/checkup-type: kubevirt-vm-latency
+data:
+  status.succeeded: 'true'
+  spec.param.targetNode: ocp-mk42-cp2.jarvislab.guske.io
+  status.result.targetNode: ocp-mk42-cp2.jarvislab.guske.io
+  spec.param.networkAttachmentDefinitionNamespace: vms
+  spec.param.sampleDurationSeconds: '5'
+  spec.timeout: 5m
+  status.result.maxLatencyNanoSec: '6209000'
+  status.startTimestamp: '2026-04-14T17:18:23Z'
+  spec.param.sourceNode: ocp-mk42-cp1.jarvislab.guske.io
+  status.result.sourceNode: ocp-mk42-cp1.jarvislab.guske.io
+  status.failureReason: ''
+  status.result.measurementDurationSec: '5'
+  spec.param.networkAttachmentDefinitionName: nad-vlan-50
+  status.result.avgLatencyNanoSec: '2234000'
+  status.result.minLatencyNanoSec: '428000'
+  status.completionTimestamp: '2026-04-14T17:19:34Z'
+```
+
+![ocp-virt-checkups](assets/ocp-virt-checkups.png)
+
+Running the checkup will instantiate new pods:
+
+```code
+oc get pods
+NAME                                             READY   STATUS      RESTARTS   AGE
+virt-launcher-latency-check-source-gjk5h-j2cgl   3/3     Running     0          42s
+virt-launcher-latency-check-target-g96l7-cllk5   3/3     Running     0          42s
+vm-latency-checkup-1-7643-8g7gv                  1/1     Running     0          43s
+```
+
+![ocp-virt-checkup-result](assets/ocp-virt-check-result.png)
+
+The result will be stored in a `ConfigMap`:
+
+```yaml
+oc get cm vm-latency-checkup-1 -oyaml
+
+apiVersion: v1
+data:
+  spec.param.networkAttachmentDefinitionName: nad-vlan-50
+  spec.param.networkAttachmentDefinitionNamespace: vms
+  spec.param.sampleDurationSeconds: "5"
+  spec.param.sourceNode: ocp-mk42-cp1.jarvislab.guske.io
+  spec.param.targetNode: ocp-mk42-cp2.jarvislab.guske.io
+  spec.timeout: 5m
+  status.completionTimestamp: "2026-04-14T17:19:34Z"
+  status.failureReason: ""
+  status.result.avgLatencyNanoSec: "2234000"
+  status.result.maxLatencyNanoSec: "6209000"
+  status.result.measurementDurationSec: "5"
+  status.result.minLatencyNanoSec: "428000"
+  status.result.sourceNode: ocp-mk42-cp1.jarvislab.guske.io
+  status.result.targetNode: ocp-mk42-cp2.jarvislab.guske.io
+  status.startTimestamp: "2026-04-14T17:18:23Z"
+  status.succeeded: "true"
+kind: ConfigMap
+metadata:
+  creationTimestamp: "2026-04-14T17:18:22Z"
+  labels:
+    kiagnose/checkup-type: kubevirt-vm-latency
+  name: vm-latency-checkup-1
+  namespace: vms
+  resourceVersion: "188052432"
+  uid: c58d68e0-e792-475a-b395-8408238e5406
 ```
