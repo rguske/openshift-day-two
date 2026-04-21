@@ -64,6 +64,7 @@
     - [Network Latency Checkup](#network-latency-checkup)
     - [Storage Checkups](#storage-checkups)
     - [kubevirt-realtime-checkup](#kubevirt-realtime-checkup)
+  - [Micro-Segmentation VMs using MultiNetworkPolicies](#micro-segmentation-vms-using-multinetworkpolicies)
 
 
 ## OpenShift Identity Providers
@@ -2937,7 +2938,6 @@ spec:
 ```
 
 - Create the `L2Advertisement` accordingly
-- Important! Bind the L2Adv. to a specific interface:
 
 ```yaml
 apiVersion: metallb.io/v1beta1
@@ -3349,3 +3349,328 @@ rhel9-ab4ec16077fe             Succeeded   100.0%     1          97d
 Checkout this repository for an automated test checking the readiness of a KubeVirt cluster to run virtualized realtime workloads.
 
 --> [kubevirt-realtime-checkup](https://github.com/kiagnose/kubevirt-realtime-checkup)
+
+## Micro-Segmentation VMs using MultiNetworkPolicies
+
+In OpenShift Virtualization (via Kubernetes + Multus), a `MultiNetworkPolicy` is used to control traffic on secondary networks (not the default pod network).
+
+- [docs on MultiNetworkPolicies](https://docs.redhat.com/en/documentation/openshift_container_platform/4.21/html/multiple_networks/understanding-multiple-networks)
+
+- Create two projects:
+
+```code
+oc new-project dev-a
+oc new-project dev-b
+```
+
+- Create VMs in both new projects:
+
+```code
+export VM=rhel9-a && echo $VM
+```
+
+```yaml
+oc create -f - <<EOF
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: '${VM}'
+  namespace: dev-a
+  labels:
+    vm.openshift.io/folder: linux
+spec:
+  dataVolumeTemplates:
+    - apiVersion: cdi.kubevirt.io/v1beta1
+      kind: DataVolume
+      metadata:
+        name: '${VM}'
+      spec:
+        sourceRef:
+          kind: DataSource
+          name: rhel9
+          namespace: openshift-virtualization-os-images
+        storage:
+          resources:
+            requests:
+              storage: 30Gi
+  runStrategy: RerunOnFailure
+  template:
+    metadata:
+      annotations:
+        kubevirt.io/pci-topology-version: v3
+        vm.kubevirt.io/flavor: small
+        vm.kubevirt.io/os: rhel9
+        vm.kubevirt.io/workload: server
+    spec:
+      architecture: amd64
+      domain:
+        cpu:
+          cores: 1
+          sockets: 1
+          threads: 1
+        devices:
+          disks:
+            - bootOrder: 1
+              disk:
+                bus: virtio
+              name: rootdisk
+            - disk:
+                bus: virtio
+              name: cloudinitdisk
+          interfaces:
+            - bridge: {}
+              model: virtio
+              name: default
+              state: up
+          rng: {}
+        features:
+          acpi: {}
+          smm:
+            enabled: true
+        firmware:
+          bootloader:
+            efi: {}
+        machine:
+          type: pc-q35-rhel9.6.0
+        memory:
+          guest: 2Gi
+        resources: {}
+      networks:
+        - multus:
+            networkName: nad-br-data-vlan50
+          name: default
+      volumes:
+        - dataVolume:
+            name: '${VM}'
+          name: rootdisk
+        - cloudInitNoCloud:
+            userData: |-
+              #cloud-config
+              user: cloud-user
+              password: redhat
+              chpasswd: { expire: False }
+          name: cloudinitdisk
+EOF
+```
+
+- create a second VM
+
+```code
+export VM=rhel9-b && echo $VM
+```
+
+```yaml
+oc create -f - <<EOF
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: '${VM}'
+  namespace: dev-a
+  labels:
+    vm.openshift.io/folder: linux
+spec:
+  dataVolumeTemplates:
+    - apiVersion: cdi.kubevirt.io/v1beta1
+      kind: DataVolume
+      metadata:
+        name: '${VM}'
+      spec:
+        sourceRef:
+          kind: DataSource
+          name: rhel9
+          namespace: openshift-virtualization-os-images
+        storage:
+          resources:
+            requests:
+              storage: 30Gi
+  runStrategy: RerunOnFailure
+  template:
+    metadata:
+      annotations:
+        kubevirt.io/pci-topology-version: v3
+        vm.kubevirt.io/flavor: small
+        vm.kubevirt.io/os: rhel9
+        vm.kubevirt.io/workload: server
+    spec:
+      architecture: amd64
+      domain:
+        cpu:
+          cores: 1
+          sockets: 1
+          threads: 1
+        devices:
+          disks:
+            - bootOrder: 1
+              disk:
+                bus: virtio
+              name: rootdisk
+            - disk:
+                bus: virtio
+              name: cloudinitdisk
+          interfaces:
+            - bridge: {}
+              model: virtio
+              name: default
+              state: up
+          rng: {}
+        features:
+          acpi: {}
+          smm:
+            enabled: true
+        firmware:
+          bootloader:
+            efi: {}
+        machine:
+          type: pc-q35-rhel9.6.0
+        memory:
+          guest: 2Gi
+        resources: {}
+      networks:
+        - multus:
+            networkName: nad-br-data-vlan50
+          name: default
+      volumes:
+        - dataVolume:
+            name: '${VM}'
+          name: rootdisk
+        - cloudInitNoCloud:
+            userData: |-
+              #cloud-config
+              user: cloud-user
+              password: redhat
+              chpasswd: { expire: False }
+          name: cloudinitdisk
+EOF
+```
+
+- create a NetworkAttachmentDefinition for project dev-a
+- in my example using VLAN50
+
+```yaml
+oc create -f - <<EOF
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: nad-br-data-vlan50
+  namespace: dev-a
+spec:
+  config: |-
+    {
+        "cniVersion": "0.4.0",
+        "name": "physnet-data",
+        "type": "ovn-k8s-cni-overlay",
+        "mtu": 1500,
+        "netAttachDefName": "dev-a/nad-br-data-vlan50",
+        "topology": "localnet",
+        "vlanID": 50
+    }
+EOF
+```
+
+- and VLAN51 for project dev-b
+
+```yaml
+oc create -f - <<EOF
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: nad-br-data-vlan50
+  namespace: dev-b
+spec:
+  config: |-
+    {
+        "cniVersion": "0.4.0",
+        "name": "physnet-data",
+        "type": "ovn-k8s-cni-overlay",
+        "mtu": 1500,
+        "netAttachDefName": "dev-b/nad-br-data-vlan50",
+        "topology": "localnet",
+        "vlanID": 50
+    }
+EOF
+```
+
+- validate IP assignment (DHCP)
+
+```code
+oc get vmi -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .status.interfaces[*]}{.ipAddress}{" "}{end}{"\n"}{end}'
+
+rhel9-a 192.168.50.179
+rhel9-c 192.168.50.185
+```
+
+- connect to your vm in project `dev-a` and validate communication to project `dev-b`
+
+```code
+virtctl ssh cloud-user@vm/rhel9-a -i ~/.ssh/id_jarvishomelab_ed25519
+```
+
+- create a `MultiNetworkPolicy` which denies all incoming as well as outgoing traffic for all pods in the project dev-a:
+
+```yaml
+oc create -f - <<EOF
+apiVersion: k8s.cni.cncf.io/v1beta1
+kind: MultiNetworkPolicy
+metadata:
+  name: default-deny-to-dev-a
+  namespace: dev-a
+  annotations:
+    k8s.v1.cni.cncf.io/policy-for: dev-a/nad-br-data-vlan50
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+EOF
+```
+
+- if the use-case is, that only ingress should be affected for vms which has the label `security=development` attached, use:
+
+```yaml
+oc create -f - <<EOF
+apiVersion: k8s.cni.cncf.io/v1beta1
+kind: MultiNetworkPolicy
+metadata:
+  name: default-deny-to-label-development
+  namespace: dev-a
+  annotations:
+    k8s.v1.cni.cncf.io/policy-for: dev-a/nad-br-data-vlan50
+spec:
+  podSelector:
+    matchLabels:
+      security-label: development
+  policyTypes:
+    - Ingress
+  ingress: []
+EOF
+```
+
+- the next `MultiNetworkPolicy` only allows communication on port 22 (ssh)
+- this time again using the label `security-label=development`
+
+```yaml
+oc create -f - <<EOF
+apiVersion: k8s.cni.cncf.io/v1beta1
+kind: MultiNetworkPolicy
+metadata:
+  name: allow-ssh-only-to-label-development
+  namespace: dev-a
+  annotations:
+    k8s.v1.cni.cncf.io/policy-for: dev-a/nad-br-data-vlan50
+spec:
+  podSelector:
+    matchLabels:
+      security-label: development
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 22
+EOF
+```
+
+- validate its functionality
+- `ssh` should work but `icmp` not
