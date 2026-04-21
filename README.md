@@ -3363,6 +3363,61 @@ oc new-project dev-a
 oc new-project dev-b
 ```
 
+- important is that a bridge-mapping in the `nncp` exists
+
+```yaml
+[...]
+    ovn:
+      bridge-mappings:
+        - bridge: br-data
+          localnet: physnet-data
+          state: present
+```
+
+- create two `network-attachment-definition` in the projects
+
+```yaml
+oc create -f - <<EOF
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: nad-br-data-vlan50
+  namespace: dev-a
+spec:
+  config: |-
+    {
+        "cniVersion": "0.4.0",
+        "name": "physnet-data",
+        "type": "ovn-k8s-cni-overlay",
+        "mtu": 1500,
+        "netAttachDefName": "dev-a/nad-br-data-vlan50",
+        "topology": "localnet",
+        "vlanID": 50
+    }
+EOF
+```
+
+```yaml
+oc create -f - <<EOF
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: nad-br-data-vlan50
+  namespace: dev-b
+spec:
+  config: |-
+    {
+        "cniVersion": "0.4.0",
+        "name": "physnet-data",
+        "type": "ovn-k8s-cni-overlay",
+        "mtu": 1500,
+        "netAttachDefName": "dev-b/nad-br-data-vlan50",
+        "topology": "localnet",
+        "vlanID": 50
+    }
+EOF
+```
+
 - Create VMs in both new projects:
 
 ```code
@@ -3674,3 +3729,31 @@ EOF
 
 - validate its functionality
 - `ssh` should work but `icmp` not
+
+- the next example explicitly allows communication from the vm rhel9-b (192.168.50.180) to vm rhel9-a (192.168.50.179)
+
+```yaml
+oc create -f - <<EOF
+apiVersion: k8s.cni.cncf.io/v1beta1
+kind: MultiNetworkPolicy
+metadata:
+  name: allow-from-dev-b-vm-192-168-50-180
+  namespace: dev-a
+  annotations:
+    k8s.v1.cni.cncf.io/policy-for: dev-a/nad-br-data-vlan50
+spec:
+  podSelector:
+    matchLabels:
+      security-label: development
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 192.168.50.180/32
+EOF
+```
+
+- result should be, that only one rhel9-b can reach rhel9-a. rhel9-c can't!
+
+![multinetworkpolicy](assets/ocp-multinetworkpolicy-examples.png)
