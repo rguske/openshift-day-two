@@ -3651,7 +3651,6 @@ EOF
 oc get vmi -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .status.interfaces[*]}{.ipAddress}{" "}{end}{"\n"}{end}'
 
 rhel9-a 192.168.50.179
-rhel9-c 192.168.50.185
 ```
 
 - connect to your vm in project `dev-a` and validate communication to project `dev-b`
@@ -3703,7 +3702,7 @@ EOF
 ```
 
 - the next `MultiNetworkPolicy` only allows communication on port 22 (ssh)
-- this time again using the label `security-label=development`
+- this time using the label `security-label=development`
 
 ```yaml
 oc create -f - <<EOF
@@ -3728,9 +3727,9 @@ EOF
 ```
 
 - validate its functionality
-- `ssh` should work but `icmp` not
+- `ssh` should work but e.g. `icmp` not
 
-- the next example explicitly allows communication from the vm rhel9-b (192.168.50.180) to vm rhel9-a (192.168.50.179)
+Another example explicitly allows communication from vm rhel9-b (192.168.50.180) to vm rhel9-a (192.168.50.179)
 
 ```yaml
 oc create -f - <<EOF
@@ -3754,6 +3753,6 @@ spec:
 EOF
 ```
 
-- result should be, that only one rhel9-b can reach rhel9-a. rhel9-c can't!
+- result should be, that only rhel9-b can reach rhel9-a. rhel9-c can't!
 
 ![multinetworkpolicy](assets/ocp-multinetworkpolicy-examples.png)
