@@ -65,7 +65,7 @@
     - [Storage Checkups](#storage-checkups)
     - [kubevirt-realtime-checkup](#kubevirt-realtime-checkup)
   - [Micro-Segmentation VMs using MultiNetworkPolicies](#micro-segmentation-vms-using-multinetworkpolicies)
-
+  - [Add new Worker-Node](#add-new-worker-node)
 
 ## OpenShift Identity Providers
 
@@ -3756,3 +3756,155 @@ EOF
 - result should be, that only rhel9-b can reach rhel9-a. rhel9-c can't!
 
 ![multinetworkpolicy](assets/ocp-multinetworkpolicy-examples.png)
+
+## Add new Worker-Node
+
+[6.4. Adding worker nodes to an on-premise cluster](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/nodes/working-with-nodes)
+
+```code
+oc get nodes
+NAME               STATUS   ROLES                  AGE    VERSION
+rguske-ocp42-cp1   Ready    control-plane,master   129d   v1.35.5
+rguske-ocp42-cp2   Ready    control-plane,master   129d   v1.35.5
+rguske-ocp42-cp3   Ready    control-plane,master   129d   v1.35.5
+rguske-ocp42-n1    Ready    worker                 129d   v1.35.5
+rguske-ocp42-n2    Ready    worker                 129d   v1.35.5
+rguske-ocp42-n3    Ready    worker                 129d   v1.35.5
+```
+
+```bash
+export NODECONFIGFOLDER='/Users/rguske/.../My Drive/dev/lab/rguske-ocp42/cluster'
+```
+
+```yaml
+tee ${NODECONFIGFOLDER}/nodes-config.yaml > /dev/null <<'EOF'
+hosts:
+  - hostname: rguske-ocp42-n4.rguske.coe.muc.redhat.com
+    interfaces:
+      - macAddress: 02:d8:6d:a6:6a:7f
+        name: enp1s0
+    networkConfig:
+      interfaces:
+        - name: enp1s0
+          type: ethernet
+          state: up
+          mtu: 1450
+          mac-address: 02:d8:6d:a6:6a:7f
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: 10.32.96.143
+                prefix-length: 20
+      dns-resolver:
+        config:
+          server:
+            - 10.32.96.1
+            - 10.32.96.31
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: 10.32.111.254
+            next-hop-interface: enp1s0
+            table-id: 254
+EOF
+```
+
+```bash
+oc adm node-image create --dir ${NODECONFIGFOLDER}
+
+2026-06-26T13:04:03Z [node-image create] installer pullspec obtained from installer-images configMap quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:a84b6cf7de073f9b592f493dca06ca6c6b4561d6b197fa04212b0e1978d095de
+2026-06-26T13:04:04Z [node-image create] Launching command
+2026-06-26T13:04:44Z [node-image create] Gathering additional information from the target cluster
+2026-06-26T13:04:44Z [node-image create] Creating internal configuration manifests
+2026-06-26T13:04:44Z [node-image create] Rendering ISO ignition
+2026-06-26T13:04:49Z [node-image create] Retrieving the base ISO image
+2026-06-26T13:04:49Z [node-image create]   Extracting base image from release payload
+2026-06-26T13:05:14Z [node-image create]   Verifying base image version
+2026-06-26T13:05:44Z [node-image create] Creating agent artifacts for the final image
+2026-06-26T13:05:44Z [node-image create]   Extracting required artifacts from release payload
+2026-06-26T13:05:59Z [node-image create]   Preparing artifacts
+2026-06-26T13:06:04Z [node-image create] Assembling ISO image
+2026-06-26T13:06:09Z [node-image create] Saving ISO image to /Users/rguske/.../My Drive/dev/lab/rguske-ocp42/cluster
+2026-06-26T13:08:55Z [node-image create] Command successfully completed
+```
+
+```bash
+virtctl image-upload pvc rguske-ocp42-n4-iso --size 2Gi --storage-class coe-netapp-nas --access-mode ReadWriteMany --image-path $NODECONFIGFOLDER/node.x86_64.iso --insecure
+```
+
+```bash
+PVC rguske-ocp42/rguske-ocp42-n4-iso not found
+PersistentVolumeClaim rguske-ocp42/rguske-ocp42-n4-iso created
+Waiting for PVC rguske-ocp42-n4-iso upload pod to be ready...
+Pod now ready
+Uploading data to https://cdi-uploadproxy-openshift-cnv.apps.isar.coe.muc.redhat.com
+
+1.31 GiB / 1.31 GiB [---------------------------------------------------------------------------------------------------------------------------------------------------------] 100.00% 4.52 MiB p/s 4m56s
+
+Uploading data completed successfully, waiting for processing to complete, you can hit ctrl-c without interrupting the progress
+Processing completed successfully
+Uploading /Users/rguske/.../My Drive/dev/lab/rguske-ocp42/cluster/node.x86_64.iso completed successfully
+```
+
+- Boot from the uploaded iso
+
+![add-worker](assets/add-worker.png)
+
+Check the status via:
+
+```bash
+oc adm node-image monitor --ip-addresses 10.32.96.143
+
+2026-06-28T19:00:34Z [node-image monitor] installer pullspec obtained from installer-images configMap quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:a84b6cf7de073f9b592f493dca06ca6c6b4561d6b197fa04212b0e1978d095de
+2026-06-28T19:00:34Z [node-image monitor] Launching command
+2026-06-28T19:00:40Z [node-image monitor] Monitoring IPs: [10.32.96.143]
+2026-06-28T19:02:13Z [node-image monitor] Node 10.32.96.143: Assisted Service API is available
+2026-06-28T19:02:13Z [node-image monitor] Node 10.32.96.143: Node 10.32.96.143: Cluster is adding hosts
+2026-06-28T19:02:13Z [node-image monitor] Node 10.32.96.143: Successfully registered cluster
+2026-06-28T19:02:18Z [node-image monitor] Node 10.32.96.143: Updated image information (Image type is "full-iso", SSH public key is set)
+2026-06-28T19:02:23Z [node-image monitor] Node 10.32.96.143: Host a288f3cc-42ff-5faf-948d-0aa98d9f6d50: Successfully registered
+2026-06-28T19:02:28Z [node-image monitor] Node 10.32.96.143: Host rguske-ocp42-n4.rguske.coe.muc.redhat.com validation: Missing ignition information
+2026-06-28T19:02:28Z [node-image monitor] Node 10.32.96.143: Host rguske-ocp42-n4.rguske.coe.muc.redhat.com validation: Ignition is not yet available, pending API connectivity
+2026-06-28T19:02:28Z [node-image monitor] Node 10.32.96.143: Host rguske-ocp42-n4.rguske.coe.muc.redhat.com validation: DNS validation for the api.rguske-ocp42.rguske.coe.muc.redhat.com domain cannot be completed at the moment. This could be due to other validations
+2026-06-28T19:02:28Z [node-image monitor] Node 10.32.96.143: Host rguske-ocp42-n4.rguske.coe.muc.redhat.com validation: DNS validation for the api-int.rguske-ocp42.rguske.coe.muc.redhat.com domain cannot be completed at the moment. This could be due to other validations
+2026-06-28T19:02:28Z [node-image monitor] Node 10.32.96.143: Host rguske-ocp42-n4.rguske.coe.muc.redhat.com validation: DNS validation for the *.apps.rguske-ocp42.rguske.coe.muc.redhat.com domain cannot be completed at the moment. This could be due to other validations
+2026-06-28T19:02:28Z [node-image monitor] Node 10.32.96.143: Host rguske-ocp42-n4.rguske.coe.muc.redhat.com: updated status from discovering to insufficient (Host does not meet the minimum hardware requirements: )
+2026-06-28T19:03:28Z [node-image monitor] Node 10.32.96.143: Host rguske-ocp42-n4.rguske.coe.muc.redhat.com: updated status from known to installing (Installation is in progress)
+2026-06-28T19:04:18Z [node-image monitor] Node 10.32.96.143: rguske-ocp42-n4.rguske.coe.muc.redhat.com: Performing quick format of disk vda(/dev/disk/by-path/pci-0000:07:00.0)
+2026-06-28T19:04:23Z [node-image monitor] Node 10.32.96.143: Host: rguske-ocp42-n4.rguske.coe.muc.redhat.com, reached installation stage Writing image to disk
+2026-06-28T19:04:28Z [node-image monitor] Node 10.32.96.143: Host: rguske-ocp42-n4.rguske.coe.muc.redhat.com, reached installation stage Writing image to disk: 5%
+2026-06-28T19:04:38Z [node-image monitor] Node 10.32.96.143: Host: rguske-ocp42-n4.rguske.coe.muc.redhat.com, reached installation stage Writing image to disk: 11%
+...
+2026-06-28T19:27:30Z [node-image monitor] Node 10.32.96.143: Host: rguske-ocp42-n4.rguske.coe.muc.redhat.com, reached installation stage Writing image to disk: 100%
+2026-06-28T19:27:35Z [node-image monitor] Node 10.32.96.143: Host: rguske-ocp42-n4.rguske.coe.muc.redhat.com, reached installation stage Rebooting
+2026-06-28T19:32:55Z [node-image monitor] Node 10.32.96.143: Kubelet is running
+2026-06-28T19:33:10Z [node-image monitor] Node 10.32.96.143: First CSR Pending approval
+2026-06-28T19:33:10Z [node-image monitor] Node 10.32.96.143: CSR csr-mq75k with signerName kubernetes.io/kube-apiserver-client-kubelet and username system:serviceaccount:openshift-machine-config-operator:node-bootstrapper is Pending and awaiting approval
+```
+
+```bash
+oc get csr -A
+NAME        AGE    SIGNERNAME                                    REQUESTOR                                                                   REQUESTEDDURATION   CONDITION
+csr-mq75k   2m7s   kubernetes.io/kube-apiserver-client-kubelet   system:serviceaccount:openshift-machine-config-operator:node-bootstrapper   <none>              Pending
+```
+
+```bash
+oc adm certificate approve csr-mq75k
+certificatesigningrequest.certificates.k8s.io/csr-mq75k approved
+```
+
+More will follow, therefore:
+
+```bash
+oc get csr | awk '/Pending/ { print $1 }' | xargs oc adm certificate approve
+```
+
+```bash
+...
+2026-06-28T19:37:20Z [node-image monitor] Node 10.32.96.143: Second CSR Pending approval
+2026-06-28T19:37:20Z [node-image monitor] Node 10.32.96.143: CSR csr-f4fj8 with signerName kubernetes.io/kubelet-serving and username system:node:rguske-ocp42-n4.rguske.coe.muc.redhat.com is Pending and awaiting approval
+2026-06-28T19:37:20Z [node-image monitor] Node 10.32.96.143: Node joined cluster
+2026-06-28T19:38:37Z [node-image monitor] Node 10.32.96.143: Node is Ready
+2026-06-28T19:38:46Z [node-image monitor] Command successfully completed
+```
