@@ -66,6 +66,7 @@
     - [kubevirt-realtime-checkup](#kubevirt-realtime-checkup)
   - [Micro-Segmentation VMs using MultiNetworkPolicies](#micro-segmentation-vms-using-multinetworkpolicies)
   - [Add new Worker-Node](#add-new-worker-node)
+  - [Red Hat Advanced Cluster Manager Example Policy](#red-hat-advanced-cluster-manager-example-policy)
 
 ## OpenShift Identity Providers
 
@@ -3907,4 +3908,63 @@ oc get csr | awk '/Pending/ { print $1 }' | xargs oc adm certificate approve
 2026-06-28T19:37:20Z [node-image monitor] Node 10.32.96.143: Node joined cluster
 2026-06-28T19:38:37Z [node-image monitor] Node 10.32.96.143: Node is Ready
 2026-06-28T19:38:46Z [node-image monitor] Command successfully completed
+```
+
+## Red Hat Advanced Cluster Manager Example Policy
+
+The following custom example policy checks if the default kubeadmin `secret` still exists on an OpenShift cluster:
+
+```yaml
+apiVersion: policy.open-cluster-management.io/v1
+kind: Policy
+metadata:
+  name: policy-kubeadmin-exists
+  namespace: open-cluster-management-global-set
+spec:
+  disabled: false
+  remediationAction: inform
+  policy-templates:
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: policy-kubeadmin-exists
+        spec:
+          remediationAction: inform
+          severity: high
+          object-templates:
+            - complianceType: mustnothave
+              objectDefinition:
+                apiVersion: v1
+                kind: Secret
+                metadata:
+                  name: kubeadmin
+                  namespace: kube-system
+---
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: policy-kubeadmin-exists-placement
+  namespace: open-cluster-management-global-set
+spec:
+  predicates:
+    - requiredClusterSelector:
+        labelSelector:
+          matchExpressions: []
+  clusterSets:
+    - global
+---
+apiVersion: policy.open-cluster-management.io/v1
+kind: PlacementBinding
+metadata:
+  name: policy-kubeadmin-exists-placement
+  namespace: open-cluster-management-global-set
+placementRef:
+  name: policy-kubeadmin-exists-placement
+  apiGroup: cluster.open-cluster-management.io
+  kind: Placement
+subjects:
+  - name: policy-kubeadmin-exists
+    apiGroup: policy.open-cluster-management.io
+    kind: Policy
 ```
