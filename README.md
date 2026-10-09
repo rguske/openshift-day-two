@@ -1762,6 +1762,7 @@ Prometheus does not support file systems that are not POSIX compliant. For examp
 Update the ConfigMap:
 
 ```yaml
+oc create -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -1771,13 +1772,15 @@ data:
   config.yaml: |
     prometheusK8s:
       retention: 96h
-      retentionSize: 180GB
+      retentionSize: 100GB
       volumeClaimTemplate:
         spec:
-          storageClassName: kubevirt-odf-replica-two-file
+          storageClassName: synology-ext4-default
+          volumeMode: Filesystem
           resources:
             requests:
-              storage: 40Gi
+              storage: 80Gi
+EOF
 ```
 
 The `STS` is updated and the pods were restarted:
@@ -1856,7 +1859,7 @@ oc -n openshift-workload-availability get secret prometheus-user-workload-token 
 Create the ServiceMonitor:
 
 ```yaml
-oc create -f - <<EOF
+oc apply -f - <<EOF
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -2319,7 +2322,16 @@ count(kubevirt_vmi_migration_succeeded)
 
 ## User-Workload Monitoring with Grafana
 
+[Source: Monitor OpenShift Virtualization using user-defined projects and Grafana](https://developers.redhat.com/articles/2024/08/19/monitor-openshift-virtualization-using-user-defined-projects-and-grafana#)
+
 - install the Grafana Community Operator in the specific namespace `openshift-user-workload-monitoring`
+- Click the operator, then click Install.
+- In Update Channel, select v5.
+- In Installation Mode, select A specific namespace on the cluster and choose
+- openshift-user-workload-monitoring below.
+- In Update approval, select Automatic
+- Click Install.
+- Continue with:
 
 ```code
 oc project openshift-user-workload-monitoring
@@ -2330,14 +2342,10 @@ oc adm policy add-cluster-role-to-user cluster-monitoring-view -z grafana-sa
 ```code
 CREATETOKEN="$(oc -n openshift-user-workload-monitoring create token grafana-sa --duration=8760h)"
 
-oc -n openshift-workload-availability create secret generic prometheus-user-workload-token \
+oc -n openshift-user-workload-monitoring create secret generic grafana-sa-token \
   --from-literal=token="$CREATETOKEN"
 
-GETTOKEN="$(oc -n openshift-workload-availability get secret grafana-sa-token -o jsonpath='{.data.token}' | base64 -d)"
-```
-
-```code
-TOKEN="$(oc create token grafana-sa --duration=8760h)"
+TOKEN=`oc -n openshift-user-workload-monitoring get secret grafana-sa-token --template='{{ .data.token | base64decode }}'`
 ```
 
 ```code
