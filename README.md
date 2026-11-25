@@ -3,6 +3,7 @@
 ⚠️ WIP
 
 - [Red Hat OpenShift Day-2 Operations](#red-hat-openshift-day-2-operations)
+  - [Create an openshift-install binary based on a specific release](#create-an-openshift-install-binary-based-on-a-specific-release)
   - [OpenShift Identity Providers](#openshift-identity-providers)
     - [Configure `htpasswd`](#configure-htpasswd)
       - [Updating User](#updating-user)
@@ -67,6 +68,30 @@
   - [Micro-Segmentation VMs using MultiNetworkPolicies](#micro-segmentation-vms-using-multinetworkpolicies)
   - [Add new Worker-Node](#add-new-worker-node)
   - [Red Hat Advanced Cluster Manager Example Policy](#red-hat-advanced-cluster-manager-example-policy)
+
+## Create an openshift-install binary based on a specific release
+
+You can pull e.g. the 5.0.0 installer straight out of the 5.0.0 release image.
+Each openshift-install binary is tied to the release it shipped with, so openshift-install 5.0.1 always installs 5.0.1.
+But the 5.0.1 oc client can extract the matching binaries from any release.
+
+1. Check that the 5.0.0 release image exists (OpenShift Pull Secret required!):
+
+```code
+oc adm release info quay.io/openshift-release-dev/ocp-release:5.0.0-x86_64 \
+-a ~/pull-secret.json
+```
+
+2. Extract the 5.0.0 installer and client.
+
+For a Linux x86 bastion:
+
+```code
+oc adm release extract \
+--tools quay.io/openshift-release-dev/ocp-release:5.0.0-x86_64 \
+-a ~/pull-secret.json \
+--to=./ocp-5.0.0
+```
 
 ## OpenShift Identity Providers
 
